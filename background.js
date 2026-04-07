@@ -46,7 +46,88 @@ async function setupAlarm(intervalHours) {
   }
 }
 
-// ── Core backup logic ──────────────────────────────────────────────────────────
+// ── Utility functions ──────────────────────────────────────────────────────────
+
+function formatTimestamp(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${y}${m}${d}_${h}${min}`;
+}
+
+function extractChatId(url) {
+  const match = (url || '').match(/gemini\.google\.com\/app\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+// Navigate a tab to url and wait for it to finish loading
+function navigateAndWait(tabId, url, extraWaitMs = 2500) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error('頁面載入逾時（30 秒）'));
+    }, 30000);
+
+    let hasStartedLoading = false;
+
+    function onUpdated(id, info) {
+      if (id !== tabId) return;
+      if (info.status === 'loading') hasStartedLoading = true;
+      if (hasStartedLoading && info.status === 'complete') {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        // Extra wait for dynamic content to render
+        setTimeout(resolve, extraWaitMs);
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.update(tabId, { url });
+  });
+}
+
+// ── Single-conversation backup ─────────────────────────────────────────────────
+
+async function backupSingleTab(tab, dirHandle) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content.js'],
+  });
+
+  const data = results?.[0]?.result;
+  if (!data || !data.content) {
+    return { skipped: true, reason: '無法擷取對話內容（頁面可能不是對話頁）' };
+  }
+
+  const { title, content, hash, url } = data;
+  const storageKey = `hash_${encodeURIComponent(url)}`;
+  const stored = await chrome.storage.local.get(storageKey);
+
+  if (stored[storageKey] === hash) {
+    return { skipped: true, reason: '無新內容' };
+  }
+
+  const timestamp = formatTimestamp(new Date());
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+  const filename = `${safeTitle}_${timestamp}.md`;
+
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+
+  const chatId = extractChatId(url);
+  const now = new Date().toISOString();
+  const updates = { [storageKey]: hash };
+  if (chatId) updates[`chatSyncTime_${chatId}`] = now;
+  await chrome.storage.local.set(updates);
+
+  return { saved: true, filename };
+}
+
+// ── Core backup logic (current open tabs) ──────────────────────────────────────
 
 async function performBackup() {
   try {
@@ -55,7 +136,6 @@ async function performBackup() {
       return { success: false, error: '尚未設定備份資料夾，請先在 Popup 中選擇資料夾' };
     }
 
-    // Check permission without user gesture (read-only check)
     const permission = await dirHandle.queryPermission({ mode: 'readwrite' });
     if (permission !== 'granted') {
       return { success: false, error: '資料夾存取權限已遺失，請開啟 Popup 重新授權' };
@@ -71,40 +151,11 @@ async function performBackup() {
 
     for (const tab of tabs) {
       try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content.js'],
-        });
-
-        const data = results?.[0]?.result;
-        if (!data || !data.content) {
-          errors.push(`Tab ${tab.id}: 無法擷取對話內容（頁面可能不是對話頁）`);
-          continue;
+        const result = await backupSingleTab(tab, dirHandle);
+        if (result.saved) backupCount++;
+        else if (result.skipped && result.reason !== '無新內容') {
+          errors.push(`Tab ${tab.id}: ${result.reason}`);
         }
-
-        const { title, content, hash, url } = data;
-
-        // Incremental check: use conversation URL as stable key
-        const storageKey = `hash_${encodeURIComponent(url)}`;
-        const stored = await chrome.storage.local.get(storageKey);
-        if (stored[storageKey] === hash) {
-          console.log(`[Backup] No changes: ${title}`);
-          continue;
-        }
-
-        // Filename: [title]_[timestamp].md
-        const timestamp = formatTimestamp(new Date());
-        const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-        const filename = `${safeTitle}_${timestamp}.md`;
-
-        const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(content);
-        await writable.close();
-
-        await chrome.storage.local.set({ [storageKey]: hash });
-        backupCount++;
-        console.log(`[Backup] Saved: ${filename}`);
       } catch (err) {
         errors.push(`Tab ${tab.id}: ${err.message}`);
         console.error('[Backup] Tab error:', err);
@@ -125,13 +176,155 @@ async function performBackup() {
   }
 }
 
-function formatTimestamp(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const h = String(date.getHours()).padStart(2, '0');
-  const min = String(date.getMinutes()).padStart(2, '0');
-  return `${y}${m}${d}_${h}${min}`;
+// ── Full history backup ────────────────────────────────────────────────────────
+
+async function performFullHistoryBackup() {
+  // Prevent duplicate runs
+  const { fullBackupState: running } = await chrome.storage.local.get('fullBackupState');
+  if (running?.inProgress) return;
+
+  const state = {
+    inProgress: true,
+    total: 0,
+    done: 0,
+    skipped: 0,
+    currentTitle: '',
+    currentUrl: '',
+    startedAt: new Date().toISOString(),
+    errors: [],
+    fatalError: null,
+  };
+  await chrome.storage.local.set({ fullBackupState: state });
+
+  async function saveState() {
+    await chrome.storage.local.set({ fullBackupState: { ...state } });
+  }
+
+  try {
+    const dirHandle = await getFromDB('directoryHandle');
+    if (!dirHandle) {
+      state.inProgress = false;
+      state.fatalError = '尚未設定備份資料夾，請先選擇資料夾';
+      await saveState();
+      return;
+    }
+
+    const permission = await dirHandle.queryPermission({ mode: 'readwrite' });
+    if (permission !== 'granted') {
+      state.inProgress = false;
+      state.fatalError = '資料夾存取權限已遺失，請開啟 Popup 重新授權';
+      await saveState();
+      return;
+    }
+
+    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    if (!tabs.length) {
+      state.inProgress = false;
+      state.fatalError = '請先開啟 Gemini 分頁，並確認側邊欄已展開';
+      await saveState();
+      return;
+    }
+
+    const tab = tabs[0];
+    const tabId = tab.id;
+    const originalUrl = tab.url;
+
+    // Scan sidebar for conversation list
+    let conversations;
+    try {
+      const scanResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['sidebar_scanner.js'],
+      });
+      conversations = scanResults?.[0]?.result;
+    } catch (err) {
+      state.inProgress = false;
+      state.fatalError = `無法掃描側邊欄：${err.message}`;
+      await saveState();
+      return;
+    }
+
+    if (!conversations?.length) {
+      state.inProgress = false;
+      state.fatalError = '無法讀取對話清單，請確認 Gemini 側邊欄已展開';
+      await saveState();
+      return;
+    }
+
+    // Identify which conversations have never been backed up
+    const allKeys = conversations.map(c => `hash_${encodeURIComponent(c.url)}`);
+    const existingHashes = await chrome.storage.local.get(allKeys);
+    const toProcess = conversations.filter(c => !existingHashes[`hash_${encodeURIComponent(c.url)}`]);
+
+    state.total = toProcess.length;
+    state.skipped = conversations.length - toProcess.length;
+    await saveState();
+
+    if (toProcess.length === 0) {
+      state.inProgress = false;
+      state.completedAt = new Date().toISOString();
+      await saveState();
+      return;
+    }
+
+    for (const conv of toProcess) {
+      state.currentTitle = conv.title;
+      state.currentUrl = conv.url;
+      await saveState();
+
+      try {
+        await navigateAndWait(tabId, conv.url, 2500);
+
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          files: ['content.js'],
+        });
+
+        const data = results?.[0]?.result;
+        if (!data?.content) {
+          state.errors.push(`${conv.title}: 無法擷取內容`);
+        } else {
+          const { title, content, hash, url } = data;
+          const storageKey = `hash_${encodeURIComponent(url)}`;
+          const timestamp = formatTimestamp(new Date());
+          const safeTitle = (title || conv.title).replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+          const filename = `${safeTitle}_${timestamp}.md`;
+
+          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(content);
+          await writable.close();
+
+          const chatId = extractChatId(url || conv.url);
+          const now = new Date().toISOString();
+          const updates = { [storageKey]: hash };
+          if (chatId) updates[`chatSyncTime_${chatId}`] = now;
+          await chrome.storage.local.set(updates);
+        }
+      } catch (err) {
+        state.errors.push(`${conv.title}: ${err.message}`);
+        console.error('[FullBackup] Conversation error:', err);
+      }
+
+      state.done++;
+      await saveState();
+    }
+
+    // Navigate back to where we started
+    try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+
+    state.inProgress = false;
+    state.currentTitle = '';
+    state.currentUrl = '';
+    state.completedAt = new Date().toISOString();
+    await saveState();
+
+  } catch (err) {
+    console.error('[FullBackup] Fatal error:', err);
+    state.inProgress = false;
+    state.fatalError = err.message;
+    await chrome.storage.local.set({ fullBackupState: state });
+  }
 }
 
 // ── Event listeners ────────────────────────────────────────────────────────────
@@ -147,7 +340,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'manualBackup') {
     performBackup().then(sendResponse);
-    return true; // Keep message channel open for async response
+    return true;
   }
 
   if (message.action === 'updateAlarm') {
@@ -158,6 +351,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'getStatus') {
     chrome.storage.local.get(['lastBackupTime'], (data) => {
       sendResponse({ lastBackupTime: data.lastBackupTime || null });
+    });
+    return true;
+  }
+
+  if (message.action === 'startFullBackup') {
+    performFullHistoryBackup(); // fire-and-forget; progress tracked in storage
+    sendResponse({ started: true });
+    return true;
+  }
+
+  if (message.action === 'getChatSyncStatus') {
+    const { url } = message;
+    const chatId = extractChatId(url);
+    const storageKey = `hash_${encodeURIComponent(url)}`;
+    const keys = [storageKey, 'fullBackupState'];
+    if (chatId) keys.push(`chatSyncTime_${chatId}`);
+
+    chrome.storage.local.get(keys, (data) => {
+      const isSynced = !!data[storageKey];
+      const lastSyncTime = chatId ? (data[`chatSyncTime_${chatId}`] || null) : null;
+      const fullState = data.fullBackupState;
+      const isSyncing = !!(fullState?.inProgress && fullState?.currentUrl === url);
+      sendResponse({ isSynced, isSyncing, lastSyncTime });
     });
     return true;
   }

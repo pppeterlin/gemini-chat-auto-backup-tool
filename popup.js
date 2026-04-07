@@ -1,5 +1,5 @@
 // popup.js - Popup UI 邏輯
-// 負責資料夾選擇、設定儲存、手動備份觸發
+// 負責資料夾選擇、設定儲存、手動備份觸發、全量備份、當前對話同步狀態
 
 const DB_NAME = 'gemini-backup-db';
 const DB_VERSION = 1;
@@ -97,12 +97,129 @@ function formatBackupTime(isoStr) {
   }
 }
 
+// ── 當前對話同步狀態 UI ────────────────────────────────────────────────────────
+
+function setSyncStatus(status, lastSyncTime) {
+  // status: 'never' | 'syncing' | 'synced'
+  const card = document.getElementById('current-chat-card');
+  const badge = document.getElementById('sync-status-badge');
+  const timeEl = document.getElementById('sync-status-time');
+
+  card.style.display = '';
+
+  badge.className = `sync-badge ${status}`;
+  if (status === 'never') {
+    badge.textContent = '未同步';
+    timeEl.textContent = '';
+  } else if (status === 'syncing') {
+    badge.textContent = '同步中';
+    timeEl.textContent = '';
+  } else {
+    badge.textContent = '已同步';
+    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
+  }
+}
+
+// ── 全量備份進度 UI ────────────────────────────────────────────────────────────
+
+function updateFullBackupUI(state) {
+  const btn = document.getElementById('btn-full-backup');
+  const progressDiv = document.getElementById('full-backup-progress');
+  const progressText = document.getElementById('progress-text');
+  const progressCurrent = document.getElementById('progress-current');
+  const progressBar = document.getElementById('progress-bar');
+
+  if (!state || (!state.inProgress && !state.completedAt && !state.fatalError)) {
+    // Never run
+    btn.disabled = false;
+    btn.innerHTML = '&#128260; 同步所有歷史';
+    progressDiv.style.display = 'none';
+    return;
+  }
+
+  if (state.fatalError) {
+    btn.disabled = false;
+    btn.innerHTML = '&#128260; 同步所有歷史';
+    progressDiv.style.display = 'block';
+    progressText.textContent = `錯誤：${state.fatalError}`;
+    progressText.style.color = '#c5221f';
+    progressCurrent.textContent = '';
+    progressBar.style.width = '0%';
+    return;
+  }
+
+  if (state.inProgress) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 備份中…';
+    progressDiv.style.display = 'block';
+    progressText.style.color = '#5f6368';
+
+    if (state.total === 0) {
+      progressText.textContent = '正在掃描對話清單…';
+      progressBar.style.width = '0%';
+    } else {
+      const pct = Math.round((state.done / state.total) * 100);
+      const skippedNote = state.skipped > 0 ? `（略過已備份 ${state.skipped} 個）` : '';
+      progressText.textContent = `${state.done} / ${state.total} 完成 ${skippedNote}`;
+      progressBar.style.width = `${pct}%`;
+    }
+
+    progressCurrent.textContent = state.currentTitle ? `處理中：「${state.currentTitle}」` : '';
+    return;
+  }
+
+  // Completed
+  btn.disabled = false;
+  btn.innerHTML = '&#128260; 同步所有歷史';
+  progressDiv.style.display = 'block';
+  progressText.style.color = '#188038';
+
+  if (state.total === 0 && state.skipped > 0) {
+    progressText.textContent = `全部 ${state.skipped} 個對話已是最新，無需備份`;
+  } else {
+    const errNote = state.errors?.length ? `，${state.errors.length} 個失敗` : '';
+    const skippedNote = state.skipped > 0 ? `，略過 ${state.skipped} 個已備份` : '';
+    progressText.textContent = `完成！備份 ${state.done} 個對話${skippedNote}${errNote}`;
+  }
+  progressCurrent.textContent = state.completedAt
+    ? `完成時間：${formatBackupTime(state.completedAt)}`
+    : '';
+  progressBar.style.width = state.total > 0 ? '100%' : '0%';
+}
+
+// ── 查詢當前對話同步狀態 ──────────────────────────────────────────────────────
+
+async function refreshCurrentChatStatus() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url?.includes('gemini.google.com/app/')) {
+      document.getElementById('current-chat-card').style.display = 'none';
+      return;
+    }
+
+    const result = await chrome.runtime.sendMessage({
+      action: 'getChatSyncStatus',
+      url: tab.url,
+    });
+
+    if (result.isSyncing) {
+      setSyncStatus('syncing', null);
+    } else if (result.isSynced) {
+      setSyncStatus('synced', result.lastSyncTime);
+    } else {
+      setSyncStatus('never', null);
+    }
+  } catch (_) {
+    document.getElementById('current-chat-card').style.display = 'none';
+  }
+}
+
 // ── Initialise ─────────────────────────────────────────────────────────────────
 
 async function init() {
   // 1. 讀取儲存的設定
-  const { backupInterval, lastBackupTime } =
-    await chrome.storage.local.get(['backupInterval', 'lastBackupTime']);
+  const { backupInterval, lastBackupTime, fullBackupState } =
+    await chrome.storage.local.get(['backupInterval', 'lastBackupTime', 'fullBackupState']);
 
   // 設定頻率下拉選單
   const select = document.getElementById('interval-select');
@@ -122,7 +239,6 @@ async function init() {
       if (permission === 'granted') {
         setFolderUI(handle.name, true);
       } else {
-        // 有 handle 但需要重新授權
         setFolderUI(handle.name + '（需要重新授權）', false);
         document.getElementById('btn-reauth').style.display = 'inline-flex';
       }
@@ -132,6 +248,24 @@ async function init() {
   } catch (_) {
     setFolderUI('尚未選擇資料夾', false);
   }
+
+  // 3. 全量備份進度
+  updateFullBackupUI(fullBackupState);
+
+  // 4. 當前對話同步狀態
+  await refreshCurrentChatStatus();
+
+  // 5. 監聽 storage 變更，即時更新進度和同步狀態
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.fullBackupState) {
+      updateFullBackupUI(changes.fullBackupState.newValue);
+    }
+    // Re-check current chat status if relevant keys changed
+    const syncKeys = Object.keys(changes).filter(
+      k => k.startsWith('hash_') || k.startsWith('chatSyncTime_')
+    );
+    if (syncKeys.length) refreshCurrentChatStatus();
+  });
 }
 
 // ── Event: 選擇資料夾 ──────────────────────────────────────────────────────────
@@ -200,7 +334,6 @@ document.getElementById('btn-backup').addEventListener('click', async () => {
     if (handle) {
       const permission = await handle.queryPermission({ mode: 'readwrite' });
       if (permission === 'prompt') {
-        // 在 user-gesture context 中請求授權
         await handle.requestPermission({ mode: 'readwrite' });
       }
     }
@@ -212,10 +345,11 @@ document.getElementById('btn-backup').addEventListener('click', async () => {
       if (result.errors?.length) {
         console.warn('[Backup] Partial errors:', result.errors);
       }
-      // 更新上次備份時間
       const { lastBackupTime } = await chrome.storage.local.get('lastBackupTime');
       document.getElementById('last-backup-time').textContent =
         formatBackupTime(lastBackupTime);
+      // 更新當前對話同步狀態
+      await refreshCurrentChatStatus();
     } else {
       showStatus(result?.error || '備份失敗，請重試', 'error');
     }
@@ -224,6 +358,37 @@ document.getElementById('btn-backup').addEventListener('click', async () => {
   } finally {
     setBackupBtnLoading(false);
   }
+});
+
+// ── Event: 同步所有歷史 ────────────────────────────────────────────────────────
+
+document.getElementById('btn-full-backup').addEventListener('click', async () => {
+  clearStatus();
+
+  // 確認資料夾授權（user-gesture context）
+  try {
+    const handle = await getHandleFromDB();
+    if (!handle) {
+      showStatus('請先選擇備份資料夾', 'error');
+      return;
+    }
+    const permission = await handle.queryPermission({ mode: 'readwrite' });
+    if (permission === 'prompt') {
+      await handle.requestPermission({ mode: 'readwrite' });
+    }
+    if (permission === 'denied') {
+      showStatus('資料夾存取被拒絕，請重新授權', 'error');
+      return;
+    }
+  } catch (err) {
+    showStatus(`授權失敗：${err.message}`, 'error');
+    return;
+  }
+
+  showStatus('已開始同步所有歷史，請勿關閉 Gemini 分頁', 'info');
+  setTimeout(clearStatus, 4000);
+
+  await chrome.runtime.sendMessage({ action: 'startFullBackup' });
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────
