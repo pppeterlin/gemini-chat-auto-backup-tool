@@ -1,0 +1,50 @@
+# Gemini 自動備份 Chrome 擴充套件：開發規格書
+
+## 1. 專案概述
+開發一個基於 Manifest V3 的 Chrome 擴充套件，旨在自動將 Google Gemini (`gemini.google.com`) 的對話紀錄備份到使用者本地指定的資料夾，並儲存為 Markdown 格式。
+
+## 2. 核心功能需求
+- **本地資料夾綁定**：利用 **File System Access API** 允許使用者選擇一個本地資料夾作為導出路徑，並授權套件寫入權限。
+- **排程備份機制**：
+    - 提供定時選項：每 1 小時、4 小時、8 小時或每日（24 小時）。
+    - 使用 `chrome.alarms` API 管理後台排程觸發。
+- **內容擷取邏輯**：
+    - 自動辨識並抓取當前對話的標題。
+    - 完整抓取所有訊息（User & Gemini），並保留基本格式（如粗體、清單、代碼塊）。
+    - 若對話中有時間資訊（Timestamp），需一併擷取。
+- **導出邏輯**：
+    - **格式**：Markdown (`.md`)。
+    - **檔名規則**：`[對話標題]_[時間戳記].md`（例如：`學習筆記_20260407.md`）。
+    - **增量備份**：僅在對話內容有更新或檢測到新訊息時才觸發寫入，避免產生大量重複檔案。
+
+## 3. 技術規格
+- **Manifest 版本**：Manifest V3
+- **權限需求 (Permissions)**：
+    - `storage`: 儲存使用者設定（備份頻率）與 FileSystemHandle。
+    - `alarms`: 處理後台計時任務。
+    - `scripting`: 在 Gemini 分頁執行對話內容擷取腳本。
+    - `host_permissions`: `https://gemini.google.com/*`
+- **關鍵 API**：
+    - `window.showDirectoryPicker()`: 讓使用者選擇本地備份資料夾。
+    - `FileSystemDirectoryHandle`: 用於跨工作階段持久化對資料夾的存取權限。
+
+## 4. 使用者介面 (Popup UI)
+- **資料夾狀態**：顯示目前是否已綁定本地資料夾。
+- **綁定按鈕**：設定/變更「導出資料夾」。
+- **備份頻率設定**：下拉式選單（1h, 4h, 8h, 24h）。
+- **立即備份按鈕**：允許使用者手動觸發一次完整備份。
+- **同步紀錄**：顯示上一次成功備份的時間戳記。
+
+## 5. 檔案結構建議
+- `manifest.json`: 套件配置。
+- `popup.html` / `popup.js`: UI 互動與設定儲存邏輯。
+- `background.js`: Service Worker，負責處理 `chrome.alarms` 定時任務與調度導出程序。
+- `content.js`: 負責在 Gemini 網頁中爬取對話 DOM 結構。
+- `lib/turndown.js`: (選配) 用於將 HTML 內容穩定轉換為 Markdown 的函式庫。
+
+## 6. 運作流程
+1. 使用者安裝套件，在 Popup 介面選擇本地資料夾並設定備份間隔。
+2. `background.js` 根據設定啟動定時器。
+3. 觸發時，`background.js` 確認是否有開啟中的 Gemini 分頁。
+4. 若有，則注入 `content.js` 抓取對話內容並傳回 `background.js`。
+5. `background.js` 使用儲存的 `DirectoryHandle` 將內容寫入本地 `.md` 檔案。

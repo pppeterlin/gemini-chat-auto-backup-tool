@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gemini Backup - 測試套件</title>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; max-width: 860px; margin: 0 auto; padding: 24px; background: #f8f9fa; color: #202124; }
+    h1 { font-size: 22px; margin-bottom: 4px; }
+    .subtitle { color: #5f6368; font-size: 14px; margin-bottom: 28px; }
+    .test-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 20px; margin-bottom: 18px; }
+    .test-section h2 { font-size: 15px; margin-bottom: 14px; color: #1a73e8; border-bottom: 1px solid #e0e0e0; padding-bottom: 8px; }
+    button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; margin: 4px; transition: background 0.15s; }
+    .btn-run { background: #1a73e8; color: #fff; }
+    .btn-run:hover { background: #1557b0; }
+    .btn-run-all { background: #188038; color: #fff; font-size: 14px; padding: 10px 20px; }
+    .btn-run-all:hover { background: #0d652d; }
+    .result { margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 6px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; }
+    .pass { color: #188038; font-weight: bold; }
+    .fail { color: #c5221f; font-weight: bold; }
+    .summary { background: #fff; border-radius: 10px; padding: 16px 20px; margin-bottom: 18px; border: 2px solid #e0e0e0; font-size: 14px; }
+    .summary.all-pass { border-color: #188038; background: #e8f5e9; }
+    .summary.has-fail { border-color: #c5221f; background: #fce8e6; }
+    #total-score { font-size: 18px; font-weight: bold; }
+
+    /* 隱藏的 Mock DOM */
+    #mock-gemini { display: none; }
+  </style>
+</head>
+<body>
+
+<h1>Gemini Chat Backup - 測試套件</h1>
+<p class="subtitle">驗證 content.js 的擷取邏輯、htmlToMarkdown 轉換器與 simpleHash 函式</p>
+
+<div id="summary" class="summary">
+  <span id="total-score">尚未執行測試</span>
+</div>
+
+<button class="btn-run-all" onclick="runAllTests()">▶ 執行全部測試</button>
+
+<!-- ── Test 1: htmlToMarkdown ─────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 1：htmlToMarkdown 轉換器</h2>
+  <button class="btn-run" onclick="runTest('t1')">執行</button>
+  <div id="result-t1" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 2: simpleHash ─────────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 2：simpleHash 雜湊函式</h2>
+  <button class="btn-run" onclick="runTest('t2')">執行</button>
+  <div id="result-t2" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 3: 擷取標題 ────────────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 3：對話標題擷取</h2>
+  <button class="btn-run" onclick="runTest('t3')">執行</button>
+  <div id="result-t3" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 4: 完整 DOM 擷取 ───────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 4：完整 Mock Gemini DOM 擷取</h2>
+  <button class="btn-run" onclick="runTest('t4')">執行</button>
+  <div id="result-t4" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 5: 增量備份雜湊偵測 ────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 5：增量備份偵測（相同內容不重複寫入）</h2>
+  <button class="btn-run" onclick="runTest('t5')">執行</button>
+  <div id="result-t5" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 6: 格式化時間戳記 ─────────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 6：formatTimestamp 時間戳記格式</h2>
+  <button class="btn-run" onclick="runTest('t6')">執行</button>
+  <div id="result-t6" class="result">（尚未執行）</div>
+</div>
+
+<!-- ── Test 7: 特殊字元檔名清理 ──────────────────────────────────────────── -->
+<div class="test-section">
+  <h2>Test 7：特殊字元檔名清理</h2>
+  <button class="btn-run" onclick="runTest('t7')">執行</button>
+  <div id="result-t7" class="result">（尚未執行）</div>
+</div>
+
+<!-- Mock Gemini DOM（隱藏） -->
+<div id="mock-gemini">
+  <h1 class="conversation-title">Python 學習筆記</h1>
+  <div id="conversation-area">
+    <user-query>
+      <div class="user-query-content">
+        請解釋 Python 的 <strong>list comprehension</strong> 是什麼？
+      </div>
+    </user-query>
+    <model-response>
+      <div class="model-response-text">
+        <p>List comprehension 是 Python 的<strong>簡潔語法</strong>，用來建立清單。</p>
+        <h3>基本語法</h3>
+        <pre><code class="language-python">squares = [x**2 for x in range(10)]</code></pre>
+        <p>等同於：</p>
+        <pre><code class="language-python">squares = []
+for x in range(10):
+    squares.append(x**2)</code></pre>
+        <h3>優點</h3>
+        <ul>
+          <li>程式碼更<em>簡潔</em></li>
+          <li>執行速度通常較快</li>
+          <li>可讀性高（適合簡單運算）</li>
+        </ul>
+      </div>
+    </model-response>
+    <user-query>
+      <div class="user-query-content">可以加上條件嗎？</div>
+    </user-query>
+    <model-response>
+      <div class="model-response-text">
+        <p>當然可以！使用 <code>if</code> 過濾：</p>
+        <pre><code class="language-python">evens = [x for x in range(20) if x % 2 == 0]</code></pre>
+      </div>
+    </model-response>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+// 從 content.js 提取核心函式（測試用，避免 chrome.* API 依賴）
+// ══════════════════════════════════════════════════════════════════════════════
+
+function queryShadowAll(root, selector) {
+  const results = [];
+  const visited = new WeakSet();
+  function traverse(node) {
+    if (!node || visited.has(node)) return;
+    visited.add(node);
+    try {
+      Array.from(node.querySelectorAll(selector)).forEach(el => results.push(el));
+      Array.from(node.querySelectorAll('*')).forEach(el => {
+        if (el.shadowRoot) traverse(el.shadowRoot);
+      });
+    } catch (_) {}
+  }
+  traverse(root);
+  return results;
+}
+
+function htmlToMarkdown(rootEl) {
+  if (!rootEl) return '';
+  function convert(node) {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const tag = node.tagName.toLowerCase();
+    if (node.style && node.style.display === 'none') return '';
+    if (['script', 'style', 'button', 'svg', 'noscript'].includes(tag)) return '';
+    const inner = () => Array.from(node.childNodes).map(convert).join('');
+    switch (tag) {
+      case 'h1': return `\n# ${inner().trim()}\n`;
+      case 'h2': return `\n## ${inner().trim()}\n`;
+      case 'h3': return `\n### ${inner().trim()}\n`;
+      case 'h4': case 'h5': case 'h6': return `\n#### ${inner().trim()}\n`;
+      case 'strong': case 'b': { const t = inner().trim(); return t ? `**${t}**` : ''; }
+      case 'em': case 'i': { const t = inner().trim(); return t ? `*${t}*` : ''; }
+      case 'p': return `\n${inner()}\n`;
+      case 'br': return '\n';
+      case 'hr': return '\n---\n';
+      case 'pre': {
+        const codeEl = node.querySelector('code');
+        const lang = (codeEl?.className || '').match(/language-(\w+)/)?.[1] || '';
+        const code = (codeEl ?? node).textContent;
+        return `\n\`\`\`${lang}\n${code}\n\`\`\`\n`;
+      }
+      case 'code': {
+        if (node.closest('pre')) return node.textContent;
+        return `\`${node.textContent}\``;
+      }
+      case 'ul': {
+        const items = Array.from(node.children).filter(c => c.tagName === 'LI')
+          .map(li => `- ${convert(li).trim()}`).join('\n');
+        return `\n${items}\n`;
+      }
+      case 'ol': {
+        const items = Array.from(node.children).filter(c => c.tagName === 'LI')
+          .map((li, i) => `${i + 1}. ${convert(li).trim()}`).join('\n');
+        return `\n${items}\n`;
+      }
+      case 'li': return inner();
+      case 'a': {
+        const href = node.getAttribute('href');
+        const text = inner().trim();
+        if (!href || href.startsWith('javascript:')) return text;
+        return `[${text}](${href})`;
+      }
+      case 'blockquote': return `\n> ${inner().trim().replace(/\n/g, '\n> ')}\n`;
+      default: return inner();
+    }
+  }
+  return convert(rootEl).replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = Math.imul(31, hash) + str.charCodeAt(i) | 0;
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function formatTimestamp(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${y}${m}${d}_${h}${min}`;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 測試工具
+// ══════════════════════════════════════════════════════════════════════════════
+
+const testResults = {};
+
+function assert(label, condition, detail = '') {
+  const icon = condition ? '✅ PASS' : '❌ FAIL';
+  return `${icon}  ${label}${detail ? '\n       ' + detail : ''}`;
+}
+
+function assertEqual(label, actual, expected) {
+  const ok = actual === expected;
+  return assert(label, ok, ok ? '' : `Expected: ${JSON.stringify(expected)}\n       Got:      ${JSON.stringify(actual)}`);
+}
+
+function assertContains(label, haystack, needle) {
+  const ok = typeof haystack === 'string' && haystack.includes(needle);
+  return assert(label, ok, ok ? '' : `Expected to contain: "${needle}"\n       In: "${haystack?.substring(0, 80)}..."`);
+}
+
+function assertMatch(label, str, regex) {
+  const ok = regex.test(str);
+  return assert(label, ok, ok ? '' : `Expected match: ${regex}\n       Got: "${str}"`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 測試案例
+// ══════════════════════════════════════════════════════════════════════════════
+
+const tests = {
+
+  t1() {
+    const lines = ['=== htmlToMarkdown 轉換器 ===\n'];
+
+    // 粗體
+    const b = document.createElement('b'); b.textContent = 'Bold Text';
+    lines.push(assertEqual('粗體 <b>', htmlToMarkdown(b), '**Bold Text**'));
+
+    // 斜體
+    const em = document.createElement('em'); em.textContent = 'italic';
+    lines.push(assertEqual('斜體 <em>', htmlToMarkdown(em), '*italic*'));
+
+    // 標題
+    const h2 = document.createElement('h2'); h2.textContent = 'Section';
+    lines.push(assertContains('標題 <h2>', htmlToMarkdown(h2), '## Section'));
+
+    // 程式碼塊
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.className = 'language-python'; code.textContent = 'print("hi")';
+    pre.appendChild(code);
+    lines.push(assertContains('程式碼塊 (python)', htmlToMarkdown(pre), '```python'));
+    lines.push(assertContains('程式碼塊內容', htmlToMarkdown(pre), 'print("hi")'));
+
+    // 清單
+    const ul = document.createElement('ul');
+    ['A', 'B', 'C'].forEach(t => { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+    const mdList = htmlToMarkdown(ul);
+    lines.push(assertContains('無序清單 - A', mdList, '- A'));
+    lines.push(assertContains('無序清單 - C', mdList, '- C'));
+
+    // 有序清單
+    const ol = document.createElement('ol');
+    ['First', 'Second'].forEach(t => { const li = document.createElement('li'); li.textContent = t; ol.appendChild(li); });
+    const mdOl = htmlToMarkdown(ol);
+    lines.push(assertContains('有序清單 1.', mdOl, '1. First'));
+    lines.push(assertContains('有序清單 2.', mdOl, '2. Second'));
+
+    // 連結
+    const a = document.createElement('a');
+    a.href = 'https://example.com'; a.textContent = 'Click';
+    lines.push(assertEqual('連結', htmlToMarkdown(a), '[Click](https://example.com)'));
+
+    // 忽略隱藏元素
+    const hidden = document.createElement('div');
+    hidden.style.display = 'none'; hidden.textContent = 'secret';
+    lines.push(assertEqual('隱藏元素忽略', htmlToMarkdown(hidden), ''));
+
+    // 忽略 script
+    const script = document.createElement('script'); script.textContent = 'alert(1)';
+    lines.push(assertEqual('script 標籤忽略', htmlToMarkdown(script), ''));
+
+    return lines.join('\n');
+  },
+
+  t2() {
+    const lines = ['=== simpleHash 雜湊函式 ===\n'];
+
+    const h1 = simpleHash('hello world');
+    const h2 = simpleHash('hello world');
+    const h3 = simpleHash('hello world!');
+
+    lines.push(assert('相同輸入產生相同雜湊', h1 === h2, `hash = ${h1}`));
+    lines.push(assert('不同輸入產生不同雜湊', h1 !== h3, `"hello world"=${h1}, "hello world!"=${h3}`));
+    lines.push(assert('空字串不崩潰', typeof simpleHash('') === 'string'));
+    lines.push(assert('回傳十六進位字串', /^[0-9a-f]+$/.test(h1), `value = ${h1}`));
+    lines.push(assert('中文字元不崩潰', typeof simpleHash('測試中文') === 'string'));
+
+    return lines.join('\n');
+  },
+
+  t3() {
+    const lines = ['=== 對話標題擷取 ===\n'];
+
+    // 測試 1：有 .conversation-title
+    const doc1 = document.getElementById('mock-gemini');
+    const titleEl = doc1.querySelector('.conversation-title');
+    lines.push(assert('.conversation-title 元素存在', !!titleEl, titleEl?.textContent));
+    lines.push(assertEqual('標題文字正確', titleEl?.textContent?.trim(), 'Python 學習筆記'));
+
+    // 測試 2：從 document.title fallback（移除 " - Gemini" 後綴）
+    const mockTitle = 'Python 教學 - Gemini';
+    const extracted = mockTitle.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim();
+    lines.push(assertEqual('document.title fallback 移除後綴', extracted, 'Python 教學'));
+
+    // 測試 3：完全無法辨識時回傳預設值
+    const emptyTitle = '   - Gemini  ';
+    const fallback = emptyTitle.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim() || '未命名對話';
+    lines.push(assertEqual('空白標題 fallback', fallback, '未命名對話'));
+
+    return lines.join('\n');
+  },
+
+  t4() {
+    const lines = ['=== 完整 Mock Gemini DOM 擷取 ===\n'];
+
+    const container = document.getElementById('mock-gemini');
+    const userEls = queryShadowAll(container, 'user-query');
+    const modelEls = queryShadowAll(container, 'model-response');
+
+    lines.push(assert('找到使用者訊息', userEls.length > 0, `count = ${userEls.length}`));
+    lines.push(assert('找到 Gemini 回應', modelEls.length > 0, `count = ${modelEls.length}`));
+    lines.push(assertEqual('使用者訊息數量 = 2', userEls.length, 2));
+    lines.push(assertEqual('Gemini 回應數量 = 2', modelEls.length, 2));
+
+    // 驗證 Markdown 輸出
+    const userMd = htmlToMarkdown(userEls[0]);
+    const modelMd = htmlToMarkdown(modelEls[0]);
+
+    lines.push(assertContains('使用者訊息含 list comprehension', userMd, 'list comprehension'));
+    lines.push(assertContains('粗體在使用者訊息中', userMd, '**list comprehension**'));
+    lines.push(assertContains('Gemini 回應含 List comprehension', modelMd, 'List comprehension'));
+    lines.push(assertContains('Gemini 回應含 Python 程式碼', modelMd, '```python'));
+    lines.push(assertContains('Gemini 回應含清單', modelMd, '- 程式碼更'));
+
+    // 組合成完整 Markdown
+    let md = `# Python 學習筆記\n\n`;
+    const max = Math.max(userEls.length, modelEls.length);
+    for (let i = 0; i < max; i++) {
+      if (i < userEls.length) md += `## 使用者\n\n${htmlToMarkdown(userEls[i])}\n\n`;
+      if (i < modelEls.length) md += `## Gemini\n\n${htmlToMarkdown(modelEls[i])}\n\n`;
+    }
+
+    lines.push(assertContains('完整 MD 含標題', md, '# Python 學習筆記'));
+    lines.push(assertContains('完整 MD 含使用者區塊', md, '## 使用者'));
+    lines.push(assertContains('完整 MD 含 Gemini 區塊', md, '## Gemini'));
+    lines.push(assert('完整 MD 長度合理', md.length > 200, `length = ${md.length}`));
+
+    lines.push('\n--- 輸出預覽（前 600 字元）---\n' + md.substring(0, 600));
+
+    return lines.join('\n');
+  },
+
+  t5() {
+    const lines = ['=== 增量備份偵測 ===\n'];
+
+    const content1 = '# 對話\n\n使用者：你好\n\nGemini：你好！';
+    const content2 = '# 對話\n\n使用者：你好\n\nGemini：你好！';
+    const content3 = '# 對話\n\n使用者：你好\n\nGemini：你好！有什麼需要幫忙？';
+
+    const h1 = simpleHash(content1);
+    const h2 = simpleHash(content2);
+    const h3 = simpleHash(content3);
+
+    lines.push(assert('相同內容雜湊相同（應略過備份）', h1 === h2));
+    lines.push(assert('新訊息後雜湊不同（應觸發備份）', h1 !== h3));
+
+    // 模擬增量邏輯
+    const storedHashes = {};
+    function shouldBackup(url, content) {
+      const hash = simpleHash(content);
+      if (storedHashes[url] === hash) return false;
+      storedHashes[url] = hash;
+      return true;
+    }
+
+    const url = 'https://gemini.google.com/app/abc123';
+    lines.push(assert('第一次備份應觸發', shouldBackup(url, content1) === true));
+    lines.push(assert('內容未變不觸發', shouldBackup(url, content2) === false));
+    lines.push(assert('新訊息後應觸發', shouldBackup(url, content3) === true));
+    lines.push(assert('再次相同不觸發', shouldBackup(url, content3) === false));
+
+    return lines.join('\n');
+  },
+
+  t6() {
+    const lines = ['=== formatTimestamp 時間戳記格式 ===\n'];
+
+    const date = new Date(2026, 3, 7, 9, 5); // 2026-04-07 09:05
+    const ts = formatTimestamp(date);
+
+    lines.push(assertEqual('格式為 YYYYMMDD_HHMM', ts, '20260407_0905'));
+    lines.push(assertMatch('符合正規表達式', ts, /^\d{8}_\d{4}$/));
+
+    // 邊界：12月31日 23:59
+    const edge = new Date(2026, 11, 31, 23, 59);
+    lines.push(assertEqual('12月31日邊界', formatTimestamp(edge), '20261231_2359'));
+
+    // 個位數月份/日期補零
+    const padded = new Date(2026, 0, 5, 8, 3);
+    lines.push(assertEqual('月份/日期/時間補零', formatTimestamp(padded), '20260105_0803'));
+
+    return lines.join('\n');
+  },
+
+  t7() {
+    const lines = ['=== 特殊字元檔名清理 ===\n'];
+
+    function sanitizeFilename(title) {
+      return title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+    }
+
+    lines.push(assertEqual('正常標題不變', sanitizeFilename('Python 學習筆記'), 'Python 學習筆記'));
+    lines.push(assertEqual('斜線替換為底線', sanitizeFilename('Node.js/Express 教學'), 'Node.js_Express 教學'));
+    lines.push(assertEqual('冒號替換', sanitizeFilename('Part 1: Introduction'), 'Part 1_ Introduction'));
+    lines.push(assertEqual('問號替換', sanitizeFilename('What is AI?'), 'What is AI_'));
+    lines.push(assertEqual('多特殊字元', sanitizeFilename('<Hello>: World*'), '_Hello__ World_'));
+    lines.push(assertEqual('空白標題 fallback', sanitizeFilename(''), '未命名對話'));
+
+    // 超長標題截斷 (60 chars)
+    const longTitle = 'A'.repeat(80);
+    lines.push(assertEqual('超長標題截斷為 60 字元', sanitizeFilename(longTitle).length, 60));
+
+    return lines.join('\n');
+  },
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 執行器
+// ══════════════════════════════════════════════════════════════════════════════
+
+function runTest(id) {
+  const resultEl = document.getElementById(`result-${id}`);
+  try {
+    const output = tests[id]();
+    resultEl.textContent = output;
+    const passed = (output.match(/✅/g) || []).length;
+    const failed = (output.match(/❌/g) || []).length;
+    testResults[id] = { passed, failed };
+    resultEl.style.borderColor = failed > 0 ? '#c5221f' : '#188038';
+  } catch (err) {
+    resultEl.textContent = `❌ 測試執行錯誤：${err.message}\n${err.stack}`;
+    testResults[id] = { passed: 0, failed: 1 };
+    resultEl.style.borderColor = '#c5221f';
+  }
+  updateSummary();
+}
+
+function runAllTests() {
+  Object.keys(tests).forEach(id => runTest(id));
+}
+
+function updateSummary() {
+  const ids = Object.keys(testResults);
+  if (!ids.length) return;
+  const total = ids.reduce((s, id) => s + testResults[id].passed + testResults[id].failed, 0);
+  const passed = ids.reduce((s, id) => s + testResults[id].passed, 0);
+  const failed = ids.reduce((s, id) => s + testResults[id].failed, 0);
+  const scoreEl = document.getElementById('total-score');
+  const summaryEl = document.getElementById('summary');
+  scoreEl.innerHTML = failed === 0
+    ? `<span class="pass">✅ 全部通過 ${passed}/${total} 個測試</span>`
+    : `<span class="fail">❌ ${failed} 個失敗</span>　<span class="pass">✅ ${passed} 個通過</span>　共 ${total} 個`;
+  summaryEl.className = `summary ${failed === 0 ? 'all-pass' : 'has-fail'}`;
+}
+</script>
+</body>
+</html>
