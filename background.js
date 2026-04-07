@@ -62,6 +62,44 @@ function extractChatId(url) {
   return match ? match[1] : null;
 }
 
+// Scroll to the top of the conversation to trigger lazy-loading of older messages,
+// then restore scroll position. Also clicks any "Expand" buttons for collapsed content.
+async function scrollToLoadAllMessages(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      // Expand any collapsed responses
+      document.querySelectorAll(
+        'button[aria-label="Expand"], button[aria-label="展開"]'
+      ).forEach(b => { try { b.click(); } catch (_) {} });
+
+      // Find the actual scrollable container (not the window, but the chat pane)
+      const scrollEl = [
+        document.querySelector('main'),
+        document.querySelector('[data-scroll-container]'),
+        document.scrollingElement,
+        document.documentElement,
+      ].find(el => el && el.scrollHeight > el.clientHeight + 100) || document.documentElement;
+
+      const origScrollTop = scrollEl.scrollTop;
+
+      // Keep scrolling to top until no new content appears (lazy load complete)
+      let prevHeight = scrollEl.scrollHeight;
+      for (let i = 0; i < 20; i++) {
+        scrollEl.scrollTop = 0;
+        await new Promise(r => setTimeout(r, 600));
+        const newHeight = scrollEl.scrollHeight;
+        if (newHeight === prevHeight) break;
+        prevHeight = newHeight;
+      }
+
+      // Restore position
+      scrollEl.scrollTop = origScrollTop || scrollEl.scrollHeight;
+      await new Promise(r => setTimeout(r, 300));
+    },
+  });
+}
+
 // Navigate a tab to url and wait for it to finish loading
 function navigateAndWait(tabId, url, extraWaitMs = 2500) {
   return new Promise((resolve, reject) => {
@@ -91,6 +129,9 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
 // ── Single-conversation backup ─────────────────────────────────────────────────
 
 async function backupSingleTab(tab, dirHandle) {
+  // Scroll to top first so lazy-loaded older messages are in the DOM
+  await scrollToLoadAllMessages(tab.id);
+
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     files: ['content.js'],
@@ -101,30 +142,74 @@ async function backupSingleTab(tab, dirHandle) {
     return { skipped: true, reason: '無法擷取對話內容（頁面可能不是對話頁）' };
   }
 
-  const { title, content, hash, url } = data;
+  const { title, content, hash, url, messages } = data;
+  const chatId = extractChatId(url);
   const storageKey = `hash_${encodeURIComponent(url)}`;
-  const stored = await chrome.storage.local.get(storageKey);
+
+  const storageKeys = [storageKey];
+  if (chatId) {
+    storageKeys.push(`chatFilename_${chatId}`, `chatMsgCount_${chatId}`);
+  }
+  const stored = await chrome.storage.local.get(storageKeys);
 
   if (stored[storageKey] === hash) {
     return { skipped: true, reason: '無新內容' };
   }
 
-  const timestamp = formatTimestamp(new Date());
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-  const filename = `${safeTitle}_${timestamp}.md`;
+  // Use a stable filename per conversation (chatId-based, no timestamp)
+  const stableFilename = chatId
+    ? `${safeTitle}_${chatId}.md`
+    : `${safeTitle}_${formatTimestamp(new Date())}.md`;
+  const filename = (chatId && stored[`chatFilename_${chatId}`]) || stableFilename;
+
+  const prevMsgCount = (chatId && stored[`chatMsgCount_${chatId}`]) || 0;
+  const currMsgCount = messages ? messages.length : 0;
+  const now = new Date().toISOString();
+
+  let writeContent = content;
+  let appended = false;
+
+  if (prevMsgCount > 0 && messages && currMsgCount > prevMsgCount) {
+    // Append only new messages to the existing file
+    let existingContent = '';
+    try {
+      const existingHandle = await dirHandle.getFileHandle(filename, { create: false });
+      existingContent = await (await existingHandle.getFile()).text();
+    } catch (_) {
+      // File was deleted — fall through to full write
+    }
+
+    if (existingContent) {
+      const appendTime = new Date().toLocaleString('zh-TW', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+      let appendMd = `\n\n---\n\n> **追加備份時間：** ${appendTime}\n\n`;
+      const newMessages = messages.slice(prevMsgCount);
+      for (const msg of newMessages) {
+        const label = msg.role === 'user' ? '使用者' : 'Gemini';
+        appendMd += `## ${label}\n\n${msg.markdown}\n\n`;
+      }
+      writeContent = existingContent.trimEnd() + appendMd;
+      appended = true;
+    }
+  }
 
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(content);
+  await writable.write(writeContent);
   await writable.close();
 
-  const chatId = extractChatId(url);
-  const now = new Date().toISOString();
   const updates = { [storageKey]: hash };
-  if (chatId) updates[`chatSyncTime_${chatId}`] = now;
+  if (chatId) {
+    updates[`chatFilename_${chatId}`] = filename;
+    updates[`chatMsgCount_${chatId}`] = currMsgCount;
+    updates[`chatSyncTime_${chatId}`] = now;
+  }
   await chrome.storage.local.set(updates);
 
-  return { saved: true, filename };
+  return { saved: true, filename, appended };
 }
 
 // ── Core backup logic (current open tabs) ──────────────────────────────────────
@@ -274,6 +359,8 @@ async function performFullHistoryBackup() {
 
       try {
         await navigateAndWait(tabId, conv.url, 2500);
+        // Scroll to load all lazy-loaded messages after page settles
+        await scrollToLoadAllMessages(tabId);
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -284,21 +371,27 @@ async function performFullHistoryBackup() {
         if (!data?.content) {
           state.errors.push(`${conv.title}: 無法擷取內容`);
         } else {
-          const { title, content, hash, url } = data;
+          const { title, content, hash, url, messages } = data;
           const storageKey = `hash_${encodeURIComponent(url)}`;
-          const timestamp = formatTimestamp(new Date());
+          const resolvedChatId = extractChatId(url || conv.url);
           const safeTitle = (title || conv.title).replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-          const filename = `${safeTitle}_${timestamp}.md`;
+          // Stable filename: no timestamp, identified by chatId
+          const filename = resolvedChatId
+            ? `${safeTitle}_${resolvedChatId}.md`
+            : `${safeTitle}_${formatTimestamp(new Date())}.md`;
 
           const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
           const writable = await fileHandle.createWritable();
           await writable.write(content);
           await writable.close();
 
-          const chatId = extractChatId(url || conv.url);
           const now = new Date().toISOString();
           const updates = { [storageKey]: hash };
-          if (chatId) updates[`chatSyncTime_${chatId}`] = now;
+          if (resolvedChatId) {
+            updates[`chatFilename_${resolvedChatId}`] = filename;
+            updates[`chatMsgCount_${resolvedChatId}`] = messages ? messages.length : 0;
+            updates[`chatSyncTime_${resolvedChatId}`] = now;
+          }
           await chrome.storage.local.set(updates);
         }
       } catch (err) {

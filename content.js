@@ -213,13 +213,18 @@
   md += `> **對話連結：** ${conversationUrl}\n\n`;
   md += '---\n\n';
 
+  const messages = [];
   const maxLen = Math.max(userEls.length, modelEls.length);
   for (let i = 0; i < maxLen; i++) {
     if (i < userEls.length) {
-      md += `## 使用者\n\n${htmlToMarkdown(userEls[i])}\n\n`;
+      const userMd = htmlToMarkdown(userEls[i]);
+      messages.push({ role: 'user', markdown: userMd });
+      md += `## 使用者\n\n${userMd}\n\n`;
     }
     if (i < modelEls.length) {
-      md += `## Gemini\n\n${htmlToMarkdown(modelEls[i])}\n\n`;
+      const modelMd = htmlToMarkdown(modelEls[i]);
+      messages.push({ role: 'model', markdown: modelMd });
+      md += `## Gemini\n\n${modelMd}\n\n`;
     }
     if (i < maxLen - 1) md += '---\n\n';
   }
@@ -229,5 +234,6 @@
     content: md,
     hash: simpleHash(md),
     url: conversationUrl,
+    messages,
   };
 })();
