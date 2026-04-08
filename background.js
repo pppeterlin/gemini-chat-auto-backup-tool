@@ -58,8 +58,22 @@ function formatTimestamp(date) {
 }
 
 function extractChatId(url) {
-  const match = (url || '').match(/gemini\.google\.com\/app\/([a-zA-Z0-9_-]+)/);
+  // Match /app/[chatId] anywhere in the URL (handles standard and Gem chat URLs)
+  const match = (url || '').match(/\/app\/([a-zA-Z0-9_-]+)/);
   return match ? match[1] : null;
+}
+
+// Always returns a stable string ID for a conversation, even when chatId is absent.
+// Used as the key for per-conversation storage entries and the filename suffix.
+function stableConvId(url) {
+  const chatId = extractChatId(url);
+  if (chatId) return chatId;
+  // URL hash as last resort (deterministic, no timestamp drift)
+  let h = 0;
+  for (let i = 0; i < (url || '').length; i++) {
+    h = (Math.imul(31, h) + url.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16);
 }
 
 // Load the full conversation history before extracting content.
@@ -204,34 +218,28 @@ async function backupSingleTab(tab, dirHandle) {
   }
 
   const { title, content, hash, url, messages } = data;
-  const chatId = extractChatId(url);
+  const convId = stableConvId(url);          // always a non-null stable string
   const storageKey = `hash_${encodeURIComponent(url)}`;
-
-  const storageKeys = [storageKey];
-  if (chatId) {
-    storageKeys.push(`chatFilename_${chatId}`, `chatMsgCount_${chatId}`);
-  }
-  const stored = await chrome.storage.local.get(storageKeys);
+  const stored = await chrome.storage.local.get([
+    storageKey,
+    `chatFilename_${convId}`,
+    `chatMsgCount_${convId}`,
+  ]);
 
   if (stored[storageKey] === hash) {
     return { skipped: true, reason: '無新內容' };
   }
 
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-  // Use a stable filename per conversation (chatId-based, no timestamp)
-  const stableFilename = chatId
-    ? `${safeTitle}_${chatId}.md`
-    : `${safeTitle}_${formatTimestamp(new Date())}.md`;
-  const filename = (chatId && stored[`chatFilename_${chatId}`]) || stableFilename;
+  // One stable file per conversation — never timestamped
+  const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
 
-  const prevMsgCount = (chatId && stored[`chatMsgCount_${chatId}`]) || 0;
+  const prevMsgCount = stored[`chatMsgCount_${convId}`] || 0;
   const currMsgCount = messages ? messages.length : 0;
   const now = new Date().toISOString();
 
-  // Safety guard: Gemini lazy-loads OLD messages upward, so indices shift on each scroll.
-  // Appending by index is unreliable. Instead, always do a full rewrite — but only when
-  // we have at least as many messages as before (proving scroll-to-load was complete).
-  // If currMsgCount < prevMsgCount the scroll didn't finish; skip to protect the existing backup.
+  // Safety guard: if we loaded fewer messages than last time, scroll didn't complete.
+  // Keep the more-complete existing backup instead of overwriting with partial data.
   if (prevMsgCount > 0 && currMsgCount < prevMsgCount) {
     return {
       skipped: true,
@@ -244,13 +252,12 @@ async function backupSingleTab(tab, dirHandle) {
   await writable.write(content);
   await writable.close();
 
-  const updates = { [storageKey]: hash };
-  if (chatId) {
-    updates[`chatFilename_${chatId}`] = filename;
-    updates[`chatMsgCount_${chatId}`] = currMsgCount;
-    updates[`chatSyncTime_${chatId}`] = now;
-  }
-  await chrome.storage.local.set(updates);
+  await chrome.storage.local.set({
+    [storageKey]: hash,
+    [`chatFilename_${convId}`]: filename,
+    [`chatMsgCount_${convId}`]: currMsgCount,
+    [`chatSyncTime_${convId}`]: now,
+  });
 
   return { saved: true, filename };
 }
@@ -416,12 +423,9 @@ async function performFullHistoryBackup() {
         } else {
           const { title, content, hash, url, messages } = data;
           const storageKey = `hash_${encodeURIComponent(url)}`;
-          const resolvedChatId = extractChatId(url || conv.url);
+          const convId = stableConvId(url || conv.url);
           const safeTitle = (title || conv.title).replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-          // Stable filename: no timestamp, identified by chatId
-          const filename = resolvedChatId
-            ? `${safeTitle}_${resolvedChatId}.md`
-            : `${safeTitle}_${formatTimestamp(new Date())}.md`;
+          const filename = `${safeTitle}_${convId}.md`; // always stable, never timestamped
 
           const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
           const writable = await fileHandle.createWritable();
@@ -429,13 +433,12 @@ async function performFullHistoryBackup() {
           await writable.close();
 
           const now = new Date().toISOString();
-          const updates = { [storageKey]: hash };
-          if (resolvedChatId) {
-            updates[`chatFilename_${resolvedChatId}`] = filename;
-            updates[`chatMsgCount_${resolvedChatId}`] = messages ? messages.length : 0;
-            updates[`chatSyncTime_${resolvedChatId}`] = now;
-          }
-          await chrome.storage.local.set(updates);
+          await chrome.storage.local.set({
+            [storageKey]: hash,
+            [`chatFilename_${convId}`]: filename,
+            [`chatMsgCount_${convId}`]: messages ? messages.length : 0,
+            [`chatSyncTime_${convId}`]: now,
+          });
         }
       } catch (err) {
         state.errors.push(`${conv.title}: ${err.message}`);
@@ -499,14 +502,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.action === 'getChatSyncStatus') {
     const { url } = message;
-    const chatId = extractChatId(url);
+    const convId = stableConvId(url);
     const storageKey = `hash_${encodeURIComponent(url)}`;
-    const keys = [storageKey, 'fullBackupState'];
-    if (chatId) keys.push(`chatSyncTime_${chatId}`);
 
-    chrome.storage.local.get(keys, (data) => {
+    chrome.storage.local.get([storageKey, `chatSyncTime_${convId}`, 'fullBackupState'], (data) => {
       const isSynced = !!data[storageKey];
-      const lastSyncTime = chatId ? (data[`chatSyncTime_${chatId}`] || null) : null;
+      const lastSyncTime = data[`chatSyncTime_${convId}`] || null;
       const fullState = data.fullBackupState;
       const isSyncing = !!(fullState?.inProgress && fullState?.currentUrl === url);
       sendResponse({ isSynced, isSyncing, lastSyncTime });
