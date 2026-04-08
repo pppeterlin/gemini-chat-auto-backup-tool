@@ -232,10 +232,20 @@ async function init() {
     formatBackupTime(lastBackupTime);
 
   // 2. 讀取已儲存的 FileSystemDirectoryHandle
+  //    Chrome 在每次 popup 重開後可能將 permission 狀態重設為 "prompt"。
+  //    popup 本身由使用者點擊開啟，屬於 user gesture context，
+  //    可直接呼叫 requestPermission() 靜默重新授權，無需額外點擊。
   try {
     const handle = await getHandleFromDB();
     if (handle) {
-      const permission = await handle.queryPermission({ mode: 'readwrite' });
+      let permission = await handle.queryPermission({ mode: 'readwrite' });
+      if (permission !== 'granted') {
+        try {
+          permission = await handle.requestPermission({ mode: 'readwrite' });
+        } catch (_) {
+          // User activation 過期時會拋例外，降級顯示重新授權按鈕
+        }
+      }
       if (permission === 'granted') {
         setFolderUI(handle.name, true);
       } else {

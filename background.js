@@ -64,6 +64,10 @@ function extractChatId(url) {
 
 // Scroll to the top of the conversation to trigger lazy-loading of older messages,
 // then restore scroll position. Also clicks any "Expand" buttons for collapsed content.
+//
+// Gemini uses Angular CDK virtual scroll: scrollHeight stays constant while DOM nodes
+// are swapped in/out. We use MutationObserver to detect when new content appears instead
+// of comparing scrollHeight.
 async function scrollToLoadAllMessages(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -73,29 +77,36 @@ async function scrollToLoadAllMessages(tabId) {
         'button[aria-label="Expand"], button[aria-label="展開"]'
       ).forEach(b => { try { b.click(); } catch (_) {} });
 
-      // Find the actual scrollable container (not the window, but the chat pane)
+      // Find the scrollable container — CDK virtual scroll viewport takes priority
       const scrollEl = [
+        document.querySelector('.cdk-virtual-scroll-viewport'),
         document.querySelector('main'),
         document.querySelector('[data-scroll-container]'),
         document.scrollingElement,
         document.documentElement,
-      ].find(el => el && el.scrollHeight > el.clientHeight + 100) || document.documentElement;
+      ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
 
       const origScrollTop = scrollEl.scrollTop;
 
-      // Keep scrolling to top until no new content appears (lazy load complete)
-      let prevHeight = scrollEl.scrollHeight;
-      for (let i = 0; i < 20; i++) {
+      // Use MutationObserver to detect new nodes being added (virtual scroll swaps nodes)
+      for (let i = 0; i < 25; i++) {
+        let mutationSeen = false;
+        const observer = new MutationObserver(() => { mutationSeen = true; });
+        observer.observe(document.body, { childList: true, subtree: true });
+
         scrollEl.scrollTop = 0;
-        await new Promise(r => setTimeout(r, 600));
-        const newHeight = scrollEl.scrollHeight;
-        if (newHeight === prevHeight) break;
-        prevHeight = newHeight;
+        window.scrollTo(0, 0);
+
+        await new Promise(r => setTimeout(r, 800));
+        observer.disconnect();
+
+        if (!mutationSeen) break; // No new nodes → all history loaded
       }
 
       // Restore position
       scrollEl.scrollTop = origScrollTop || scrollEl.scrollHeight;
-      await new Promise(r => setTimeout(r, 300));
+      window.scrollTo(0, origScrollTop || scrollEl.scrollHeight);
+      await new Promise(r => setTimeout(r, 400));
     },
   });
 }
