@@ -326,9 +326,9 @@ async function selectLanguage(lang) {
   updateUIText();
 
   // 重新生成備份狀態文本（如果有進行中或完成的備份）
-  const fullBackupState = localStorage.getItem('fullBackupState');
+  const { fullBackupState } = await chrome.storage.local.get('fullBackupState');
   if (fullBackupState) {
-    updateFullBackupUI(JSON.parse(fullBackupState));
+    updateFullBackupUI(fullBackupState);
   }
 
   // 更新 folder UI 文本
