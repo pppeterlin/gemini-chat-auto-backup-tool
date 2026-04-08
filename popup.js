@@ -70,11 +70,11 @@ function setFolderUI(name, isBound, showReauth = false) {
   nameEl.className = isBound ? 'bound' : '';
 
   if (isBound) {
-    badge.textContent = '已綁定';
+    badge.textContent = i18nText('bound');
     badge.className = 'folder-badge';
     reauthBtn.style.display = showReauth ? 'inline-flex' : 'none';
   } else {
-    badge.textContent = '未設定';
+    badge.textContent = i18nText('notSet');
     badge.className = 'folder-badge unset';
     reauthBtn.style.display = 'none';
   }
@@ -115,17 +115,17 @@ function setSyncStatus(status, lastSyncTime) {
 
   badge.className = `sync-badge ${status}`;
   if (status === 'never') {
-    badge.textContent = '未同步';
+    badge.textContent = i18nText('neverBackup');
     timeEl.textContent = '';
   } else if (status === 'syncing') {
-    badge.textContent = '同步中';
+    badge.textContent = i18nText('backing');
     timeEl.textContent = '';
   } else if (status === 'has-new') {
-    badge.textContent = '有新訊息未同步';
-    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
+    badge.textContent = i18nText('hasNew');
+    timeEl.textContent = lastSyncTime ? `${i18nText('lastBackup')}${formatBackupTime(lastSyncTime)}` : '';
   } else {
-    badge.textContent = '已同步';
-    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
+    badge.textContent = i18nText('backed');
+    timeEl.textContent = lastSyncTime ? `${i18nText('lastBackup')}${formatBackupTime(lastSyncTime)}` : '';
   }
 }
 
@@ -263,7 +263,7 @@ async function init() {
         setFolderUI(handle.name, true);
         await chrome.storage.local.set({ folderName: handle.name });
       } else {
-        setFolderUI('尚未選擇資料夾', false);
+        setFolderUI(i18nText('folderNotSelected'), false);
       }
     }
   } catch (_) {
@@ -320,7 +320,7 @@ function initLanguageSelector() {
   });
 }
 
-function selectLanguage(lang) {
+async function selectLanguage(lang) {
   i18n.setLanguage(lang);
   updateUIText();
 
@@ -329,6 +329,17 @@ function selectLanguage(lang) {
   if (fullBackupState) {
     updateFullBackupUI(JSON.parse(fullBackupState));
   }
+
+  // 更新 folder UI 文本
+  const { folderName } = await chrome.storage.local.get('folderName');
+  if (folderName) {
+    setFolderUI(folderName, true);
+  } else {
+    setFolderUI(i18nText('folderNotSelected'), false);
+  }
+
+  // 更新當前對話同步狀態文本
+  await refreshCurrentChatStatus();
 
   // 更新 active 狀態
   document.querySelectorAll('.lang-option').forEach(opt => {

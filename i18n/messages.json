@@ -7,6 +7,7 @@
     "reauth": "重新授權",
     "bound": "已綁定",
     "notSet": "未設定",
+    "folderNotSelected": "尚未選擇資料夾",
     "backupFreq": "備份頻率",
     "autoBackup": "自動備份：",
     "off": "關閉",
