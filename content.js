@@ -128,18 +128,26 @@
 
   // ── 擷取對話標題 ──────────────────────────────────────────────────────────────
   function getTitle() {
-    // 依優先順序嘗試各種選擇器
-    const titleSelectors = [
-      '.conversation-title',
-      '[data-conversation-title]',
-      'h1',
-      '.chat-title',
-    ];
-    for (const sel of titleSelectors) {
-      const el = document.querySelector(sel);
+    // 1. Gemini 的 data-test-id（最穩定，確認存在於實際 DOM）
+    const testIdEl = document.querySelector('[data-test-id="conversation-title"]');
+    if (testIdEl?.textContent?.trim()) return testIdEl.textContent.trim();
+
+    // 2. 其他明確的對話標題選擇器（穿透 Shadow DOM）
+    for (const sel of ['.conversation-title', '[data-conversation-title]', '.chat-title']) {
+      const el = queryShadowAll(document, sel)[0];
       if (el?.textContent?.trim()) return el.textContent.trim();
     }
-    // Fallback: 從 <title> 移除 " - Gemini" 後綴
+
+    // 3. 側邊欄中目前選取的對話連結（對 Gem 對話最可靠，避免抓到 Gem 名稱）
+    for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
+      if (el.getAttribute('aria-current') === 'page' ||
+          el.getAttribute('aria-selected') === 'true') {
+        const text = el.textContent?.trim();
+        if (text && text.length >= 2 && text.length <= 120) return text;
+      }
+    }
+
+    // 4. Fallback: 從 <title> 移除 " - Gemini" 後綴
     return document.title.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim() || '未命名對話';
   }
 
@@ -213,13 +221,18 @@
   md += `> **對話連結：** ${conversationUrl}\n\n`;
   md += '---\n\n';
 
+  const messages = [];
   const maxLen = Math.max(userEls.length, modelEls.length);
   for (let i = 0; i < maxLen; i++) {
     if (i < userEls.length) {
-      md += `## 使用者\n\n${htmlToMarkdown(userEls[i])}\n\n`;
+      const userMd = htmlToMarkdown(userEls[i]);
+      messages.push({ role: 'user', markdown: userMd });
+      md += `## 使用者\n\n${userMd}\n\n`;
     }
     if (i < modelEls.length) {
-      md += `## Gemini\n\n${htmlToMarkdown(modelEls[i])}\n\n`;
+      const modelMd = htmlToMarkdown(modelEls[i]);
+      messages.push({ role: 'model', markdown: modelMd });
+      md += `## Gemini\n\n${modelMd}\n\n`;
     }
     if (i < maxLen - 1) md += '---\n\n';
   }
@@ -229,5 +242,6 @@
     content: md,
     hash: simpleHash(md),
     url: conversationUrl,
+    messages,
   };
 })();
