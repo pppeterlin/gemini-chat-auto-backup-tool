@@ -268,32 +268,37 @@
     }
     .lang-btn {
       background: none;
-      border: none;
+      border: 1.5px solid #dadce0;
+      border-radius: 4px;
       cursor: pointer;
-      font-size: 18px;
-      padding: 4px;
+      font-size: 16px;
+      padding: 6px 8px;
       display: flex;
       align-items: center;
       justify-content: center;
       color: #5f6368;
-      transition: color 0.15s;
+      transition: all 0.15s;
+      width: 32px;
+      height: 32px;
     }
     .lang-btn:hover {
+      border-color: #5f6368;
       color: #202124;
     }
     .lang-dropdown {
       position: absolute;
       top: 100%;
-      right: 0;
+      right: -4px;
       background: #fff;
       border: 1px solid #dadce0;
       border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      max-height: 300px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      max-height: 340px;
       overflow-y: auto;
       z-index: 1000;
-      min-width: 150px;
+      min-width: 160px;
       display: none;
+      margin-top: 6px;
     }
     .lang-dropdown.show {
       display: block;
@@ -336,7 +341,12 @@
       text-align: center;
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: center;
+      position: relative;
+    }
+    .footer .lang-selector {
+      position: absolute;
+      right: 12px;
     }
   </style>
 </head>
