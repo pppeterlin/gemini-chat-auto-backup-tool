@@ -94,7 +94,8 @@ function setBackupBtnLoading(loading) {
 function formatBackupTime(isoStr) {
   if (!isoStr) return '—';
   try {
-    return new Date(isoStr).toLocaleString('zh-TW', {
+    const currentLang = i18n.getCurrentLanguage();
+    return new Date(isoStr).toLocaleString(currentLang, {
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit',
     });
