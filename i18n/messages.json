@@ -29,7 +29,17 @@
     "selectLanguage": "選擇語言",
     "error": "錯誤",
     "success": "成功",
-    "info": "資訊"
+    "info": "資訊",
+    "scanning": "正在掃描對話清單…",
+    "completed": "完成！備份",
+    "skipped": "略過",
+    "dialogCount": "個對話",
+    "allDone": "全部",
+    "noNeedBackup": "已是最新，無需備份",
+    "completedTime": "完成時間：",
+    "processing": "處理中：",
+    "failures": "個失敗",
+    "done": "完成"
   },
   "zh-CN": {
     "appName": "Gemini Chat Backup",
@@ -61,7 +71,17 @@
     "selectLanguage": "选择语言",
     "error": "错误",
     "success": "成功",
-    "info": "信息"
+    "info": "信息",
+    "scanning": "正在扫描对话清单…",
+    "completed": "完成！备份",
+    "skipped": "略过",
+    "dialogCount": "个对话",
+    "allDone": "全部",
+    "noNeedBackup": "已是最新，无需备份",
+    "completedTime": "完成时间：",
+    "processing": "处理中：",
+    "failures": "个失败",
+    "done": "完成"
   },
   "en": {
     "appName": "Gemini Chat Backup",
@@ -93,7 +113,17 @@
     "selectLanguage": "Select language",
     "error": "Error",
     "success": "Success",
-    "info": "Info"
+    "info": "Info",
+    "scanning": "Scanning conversations…",
+    "completed": "Done! Backed up",
+    "skipped": "Skipped",
+    "dialogCount": "conversation(s)",
+    "allDone": "All",
+    "noNeedBackup": "are already up to date, no backup needed",
+    "completedTime": "Completed at: ",
+    "processing": "Processing: ",
+    "failures": "failure(s)",
+    "done": "completed"
   },
   "ja": {
     "appName": "Gemini Chat Backup",
@@ -125,7 +155,17 @@
     "selectLanguage": "言語を選択",
     "error": "エラー",
     "success": "成功",
-    "info": "情報"
+    "info": "情報",
+    "scanning": "会話をスキャン中…",
+    "completed": "完了！バックアップ",
+    "skipped": "スキップ",
+    "dialogCount": "個の会話",
+    "allDone": "すべて",
+    "noNeedBackup": "は既に最新、バックアップは不要",
+    "completedTime": "完了時刻：",
+    "processing": "処理中：",
+    "failures": "個の失敗",
+    "done": "完了"
   },
   "ko": {
     "appName": "Gemini Chat Backup",
@@ -157,7 +197,17 @@
     "selectLanguage": "언어 선택",
     "error": "오류",
     "success": "성공",
-    "info": "정보"
+    "info": "정보",
+    "scanning": "대화 스캔 중…",
+    "completed": "완료! 백업",
+    "skipped": "건너뜀",
+    "dialogCount": "개의 대화",
+    "allDone": "모두",
+    "noNeedBackup": "는 이미 최신, 백업 불필요",
+    "completedTime": "완료 시간：",
+    "processing": "처리 중：",
+    "failures": "개의 실패",
+    "done": "완료"
   },
   "fr": {
     "appName": "Gemini Chat Backup",
@@ -189,7 +239,17 @@
     "selectLanguage": "Sélectionner la langue",
     "error": "Erreur",
     "success": "Succès",
-    "info": "Info"
+    "info": "Info",
+    "scanning": "Numérisation des conversations…",
+    "completed": "Terminé! Sauvegardé",
+    "skipped": "Ignoré",
+    "dialogCount": "conversation(s)",
+    "allDone": "Tous",
+    "noNeedBackup": "sont déjà à jour, aucune sauvegarde nécessaire",
+    "completedTime": "Terminé à：",
+    "processing": "Traitement：",
+    "failures": "échec(s)",
+    "done": "terminé"
   },
   "es": {
     "appName": "Gemini Chat Backup",
@@ -221,7 +281,17 @@
     "selectLanguage": "Seleccionar idioma",
     "error": "Error",
     "success": "Éxito",
-    "info": "Información"
+    "info": "Información",
+    "scanning": "Escaneando conversaciones…",
+    "completed": "¡Hecho! Respaldar",
+    "skipped": "Omitido",
+    "dialogCount": "conversación(es)",
+    "allDone": "Todos",
+    "noNeedBackup": "ya están actualizados, no se necesita copia de seguridad",
+    "completedTime": "Completado en：",
+    "processing": "Procesando：",
+    "failures": "fallo(s)",
+    "done": "completado"
   },
   "pt": {
     "appName": "Gemini Chat Backup",
@@ -253,7 +323,17 @@
     "selectLanguage": "Selecionar idioma",
     "error": "Erro",
     "success": "Sucesso",
-    "info": "Informação"
+    "info": "Informação",
+    "scanning": "Escaneando conversas…",
+    "completed": "Concluído! Backup de",
+    "skipped": "Ignorado",
+    "dialogCount": "conversa(s)",
+    "allDone": "Todos",
+    "noNeedBackup": "já estão atualizados, nenhum backup necessário",
+    "completedTime": "Concluído em：",
+    "processing": "Processando：",
+    "failures": "falha(s)",
+    "done": "concluído"
   },
   "ar": {
     "appName": "Gemini Chat Backup",
@@ -285,7 +365,17 @@
     "selectLanguage": "اختر اللغة",
     "error": "خطأ",
     "success": "نجاح",
-    "info": "معلومة"
+    "info": "معلومة",
+    "scanning": "جاري مسح المحادثات…",
+    "completed": "تم! نسخ احتياطية",
+    "skipped": "تم التخطي",
+    "dialogCount": "محادثة",
+    "allDone": "الكل",
+    "noNeedBackup": "محدثة بالفعل، لا حاجة لنسخة احتياطية",
+    "completedTime": "اكتمل في：",
+    "processing": "جاري المعالجة：",
+    "failures": "فشل",
+    "done": "اكتمل"
   },
   "ru": {
     "appName": "Gemini Chat Backup",
@@ -317,6 +407,16 @@
     "selectLanguage": "Выберите язык",
     "error": "Ошибка",
     "success": "Успех",
-    "info": "Информация"
+    "info": "Информация",
+    "scanning": "Сканирование разговоров…",
+    "completed": "Готово! Сохранено",
+    "skipped": "Пропущено",
+    "dialogCount": "разговор(ов)",
+    "allDone": "Все",
+    "noNeedBackup": "уже актуальны, резервное копирование не требуется",
+    "completedTime": "Завершено в：",
+    "processing": "Обработка：",
+    "failures": "ошибка(и)",
+    "done": "завершено"
   }
 }

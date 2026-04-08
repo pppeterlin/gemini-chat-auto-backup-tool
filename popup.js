@@ -141,16 +141,16 @@ function updateFullBackupUI(state) {
   if (!state || (!state.inProgress && !state.completedAt && !state.fatalError)) {
     // Never run
     btn.disabled = false;
-    btn.innerHTML = '&#128260; 同步所有歷史';
+    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
     progressDiv.style.display = 'none';
     return;
   }
 
   if (state.fatalError) {
     btn.disabled = false;
-    btn.innerHTML = '&#128260; 同步所有歷史';
+    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
     progressDiv.style.display = 'block';
-    progressText.textContent = `錯誤：${state.fatalError}`;
+    progressText.textContent = `${i18nText('error')}：${state.fatalError}`;
     progressText.style.color = '#c5221f';
     progressCurrent.textContent = '';
     progressBar.style.width = '0%';
@@ -159,39 +159,39 @@ function updateFullBackupUI(state) {
 
   if (state.inProgress) {
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> 備份中…';
+    btn.innerHTML = `<span class="spinner"></span> ${i18nText('backingUp')}`;
     progressDiv.style.display = 'block';
     progressText.style.color = '#5f6368';
 
     if (state.total === 0) {
-      progressText.textContent = '正在掃描對話清單…';
+      progressText.textContent = i18nText('scanning');
       progressBar.style.width = '0%';
     } else {
       const pct = Math.round((state.done / state.total) * 100);
-      const skippedNote = state.skipped > 0 ? `（略過已備份 ${state.skipped} 個）` : '';
-      progressText.textContent = `${state.done} / ${state.total} 完成 ${skippedNote}`;
+      const skippedNote = state.skipped > 0 ? `（${i18nText('skipped')}${state.skipped}${i18nText('dialogCount')}）` : '';
+      progressText.textContent = `${state.done} / ${state.total} ${i18nText('done')} ${skippedNote}`;
       progressBar.style.width = `${pct}%`;
     }
 
-    progressCurrent.textContent = state.currentTitle ? `處理中：「${state.currentTitle}」` : '';
+    progressCurrent.textContent = state.currentTitle ? `${i18nText('processing')}「${state.currentTitle}」` : '';
     return;
   }
 
   // Completed
   btn.disabled = false;
-  btn.innerHTML = '&#128260; 同步所有歷史';
+  btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
   progressDiv.style.display = 'block';
   progressText.style.color = '#188038';
 
   if (state.total === 0 && state.skipped > 0) {
-    progressText.textContent = `全部 ${state.skipped} 個對話已是最新，無需備份`;
+    progressText.textContent = `${i18nText('allDone')} ${state.skipped} ${i18nText('dialogCount')} ${i18nText('noNeedBackup')}`;
   } else {
-    const errNote = state.errors?.length ? `，${state.errors.length} 個失敗` : '';
-    const skippedNote = state.skipped > 0 ? `，略過 ${state.skipped} 個已備份` : '';
-    progressText.textContent = `完成！備份 ${state.done} 個對話${skippedNote}${errNote}`;
+    const errNote = state.errors?.length ? `，${state.errors.length} ${i18nText('failures')}` : '';
+    const skippedNote = state.skipped > 0 ? `，${i18nText('skipped')} ${state.skipped} ${i18nText('dialogCount')}` : '';
+    progressText.textContent = `${i18nText('completed')} ${state.done} ${i18nText('dialogCount')}${skippedNote}${errNote}`;
   }
   progressCurrent.textContent = state.completedAt
-    ? `完成時間：${formatBackupTime(state.completedAt)}`
+    ? `${i18nText('completedTime')}${formatBackupTime(state.completedAt)}`
     : '';
   progressBar.style.width = state.total > 0 ? '100%' : '0%';
 }
@@ -323,6 +323,12 @@ function initLanguageSelector() {
 function selectLanguage(lang) {
   i18n.setLanguage(lang);
   updateUIText();
+
+  // 重新生成備份狀態文本（如果有進行中或完成的備份）
+  const fullBackupState = localStorage.getItem('fullBackupState');
+  if (fullBackupState) {
+    updateFullBackupUI(JSON.parse(fullBackupState));
+  }
 
   // 更新 active 狀態
   document.querySelectorAll('.lang-option').forEach(opt => {
