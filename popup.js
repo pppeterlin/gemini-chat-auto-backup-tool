@@ -100,7 +100,7 @@ function formatBackupTime(isoStr) {
 // ── 當前對話同步狀態 UI ────────────────────────────────────────────────────────
 
 function setSyncStatus(status, lastSyncTime) {
-  // status: 'never' | 'syncing' | 'synced'
+  // status: 'never' | 'syncing' | 'synced' | 'has-new'
   const card = document.getElementById('current-chat-card');
   const badge = document.getElementById('sync-status-badge');
   const timeEl = document.getElementById('sync-status-time');
@@ -114,6 +114,9 @@ function setSyncStatus(status, lastSyncTime) {
   } else if (status === 'syncing') {
     badge.textContent = '同步中';
     timeEl.textContent = '';
+  } else if (status === 'has-new') {
+    badge.textContent = '有新訊息未同步';
+    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
   } else {
     badge.textContent = '已同步';
     timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
@@ -200,10 +203,13 @@ async function refreshCurrentChatStatus() {
     const result = await chrome.runtime.sendMessage({
       action: 'getChatSyncStatus',
       url: tab.url,
+      tabId: tab.id,
     });
 
     if (result.isSyncing) {
       setSyncStatus('syncing', null);
+    } else if (result.isSynced && result.hasNewMessages) {
+      setSyncStatus('has-new', result.lastSyncTime);
     } else if (result.isSynced) {
       setSyncStatus('synced', result.lastSyncTime);
     } else {

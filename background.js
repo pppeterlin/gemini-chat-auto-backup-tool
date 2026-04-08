@@ -562,20 +562,80 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.action === 'getChatSyncStatus') {
-    const { url } = message;
+    const { url, tabId } = message;
     const convId = stableConvId(url);
     const storageKey = `hash_${encodeURIComponent(url)}`;
 
-    chrome.storage.local.get([storageKey, `chatSyncTime_${convId}`, 'fullBackupState'], (data) => {
-      const isSynced = !!data[storageKey];
-      const lastSyncTime = data[`chatSyncTime_${convId}`] || null;
-      const fullState = data.fullBackupState;
-      const isSyncing = !!(fullState?.inProgress && fullState?.currentUrl === url);
-      sendResponse({ isSynced, isSyncing, lastSyncTime });
-    });
+    chrome.storage.local.get(
+      [storageKey, `chatSyncTime_${convId}`, `chatMsgCount_${convId}`, 'fullBackupState'],
+      async (data) => {
+        const isSynced = !!data[storageKey];
+        const lastSyncTime = data[`chatSyncTime_${convId}`] || null;
+        const storedMsgCount = data[`chatMsgCount_${convId}`] || 0;
+        const fullState = data.fullBackupState;
+        const isSyncing = !!(fullState?.inProgress && fullState?.currentUrl === url);
+
+        let hasNewMessages = false;
+        if (isSynced && !isSyncing && tabId && storedMsgCount > 0) {
+          try {
+            const [result] = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: countMessagesOnPage,
+            });
+            const currentCount = result?.result || 0;
+            hasNewMessages = currentCount > storedMsgCount;
+          } catch (_) {}
+        }
+
+        sendResponse({ isSynced, isSyncing, lastSyncTime, hasNewMessages });
+      }
+    );
     return true;
   }
 });
+
+// ── 輕量計數函式（注入頁面）────────────────────────────────────────────────────
+// 使用與 content.js 相同的選擇器，快速計算當前頁面訊息總數
+function countMessagesOnPage() {
+  function queryShadowAll(root, selector) {
+    const results = [];
+    const visited = new WeakSet();
+    function traverse(node) {
+      if (!node || visited.has(node)) return;
+      visited.add(node);
+      try {
+        Array.from(node.querySelectorAll(selector)).forEach(el => results.push(el));
+        Array.from(node.querySelectorAll('*')).forEach(el => {
+          if (el.shadowRoot) traverse(el.shadowRoot);
+        });
+      } catch (_) {}
+    }
+    traverse(root);
+    return results;
+  }
+
+  const userSelectors = [
+    'user-query', '.user-query-content', '.query-content',
+    '[data-message-author-role="user"]', '.human-turn',
+  ];
+  const modelSelectors = [
+    'model-response', '.model-response-text',
+    'response-container .response-content',
+    '[data-message-author-role="model"]', '.ai-response',
+  ];
+
+  let userCount = 0;
+  for (const sel of userSelectors) {
+    const found = queryShadowAll(document, sel);
+    if (found.length) { userCount = found.length; break; }
+  }
+  let modelCount = 0;
+  for (const sel of modelSelectors) {
+    const found = queryShadowAll(document, sel);
+    if (found.length) { modelCount = found.length; break; }
+  }
+  return userCount + modelCount;
+}
 
 // Restore alarm on service worker restart
 chrome.runtime.onStartup.addListener(async () => {
