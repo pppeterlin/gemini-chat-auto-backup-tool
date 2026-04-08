@@ -62,22 +62,28 @@ function extractChatId(url) {
   return match ? match[1] : null;
 }
 
-// Scroll to the top of the conversation to trigger lazy-loading of older messages,
-// then restore scroll position. Also clicks any "Expand" buttons for collapsed content.
+// Scroll to the top of the conversation to trigger lazy-loading of older messages.
 //
-// Gemini uses Angular CDK virtual scroll: scrollHeight stays constant while DOM nodes
-// are swapped in/out. We use MutationObserver to detect when new content appears instead
-// of comparing scrollHeight.
+// How Gemini lazy-loading works (confirmed via Voyager):
+//   - Scrolling to the topmost loaded message triggers the room to fetch earlier history.
+//   - When new messages are prepended, the browser pushes the viewport DOWN
+//     (scrollTop increases) to keep the current view stable.
+//   - We exploit this: set scrollTop=0, then wait. If scrollTop becomes > 0,
+//     new content was prepended → scroll to top again and repeat.
+//   - If scrollTop stays at 0 after the timeout → no more history to load.
+//
+// Also falls back to DOM element count comparison for cases where
+// the browser doesn't adjust scrollTop automatically.
 async function scrollToLoadAllMessages(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     func: async () => {
-      // Expand any collapsed responses
+      // Expand any collapsed responses first
       document.querySelectorAll(
         'button[aria-label="Expand"], button[aria-label="展開"]'
       ).forEach(b => { try { b.click(); } catch (_) {} });
 
-      // Find the scrollable container — CDK virtual scroll viewport takes priority
+      // Find scrollable container (CDK virtual scroll viewport takes priority)
       const scrollEl = [
         document.querySelector('.cdk-virtual-scroll-viewport'),
         document.querySelector('main'),
@@ -86,27 +92,46 @@ async function scrollToLoadAllMessages(tabId) {
         document.documentElement,
       ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
 
+      // Count conversation turns currently in DOM (for fallback detection)
+      function countTurns() {
+        return Math.max(
+          document.querySelectorAll('user-query').length,
+          document.querySelectorAll('model-response').length,
+          document.querySelectorAll('.query-content').length,
+          document.querySelectorAll('.response-content').length,
+        );
+      }
+
       const origScrollTop = scrollEl.scrollTop;
+      let prevTurnCount = countTurns();
 
-      // Use MutationObserver to detect new nodes being added (virtual scroll swaps nodes)
-      for (let i = 0; i < 25; i++) {
-        let mutationSeen = false;
-        const observer = new MutationObserver(() => { mutationSeen = true; });
-        observer.observe(document.body, { childList: true, subtree: true });
-
+      // While loop: keep scrolling to top until no new content appears
+      for (let attempt = 0; attempt < 30; attempt++) {
         scrollEl.scrollTop = 0;
         window.scrollTo(0, 0);
 
-        await new Promise(r => setTimeout(r, 800));
-        observer.disconnect();
+        // Wait up to 8 seconds for new content (poll every 500 ms)
+        let newContentFound = false;
+        for (let t = 0; t < 16; t++) {
+          await new Promise(r => setTimeout(r, 500));
 
-        if (!mutationSeen) break; // No new nodes → all history loaded
+          const currTurns = countTurns();
+          // Primary signal: scrollTop shifted (browser pushed view down after prepend)
+          // Fallback signal: more DOM elements than before
+          if (scrollEl.scrollTop > 0 || currTurns > prevTurnCount) {
+            prevTurnCount = Math.max(prevTurnCount, currTurns);
+            newContentFound = true;
+            break;
+          }
+        }
+
+        if (!newContentFound) break; // No new content after full wait → history complete
       }
 
-      // Restore position
-      scrollEl.scrollTop = origScrollTop || scrollEl.scrollHeight;
-      window.scrollTo(0, origScrollTop || scrollEl.scrollHeight);
-      await new Promise(r => setTimeout(r, 400));
+      // Restore to bottom of conversation
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+      window.scrollTo(0, document.body.scrollHeight);
+      await new Promise(r => setTimeout(r, 500));
     },
   });
 }

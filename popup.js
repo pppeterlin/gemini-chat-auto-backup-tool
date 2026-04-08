@@ -55,7 +55,7 @@ function clearStatus() {
   el.textContent = '';
 }
 
-function setFolderUI(name, isBound) {
+function setFolderUI(name, isBound, showReauth = false) {
   const nameEl = document.getElementById('folder-name');
   const badge = document.getElementById('folder-badge');
   const reauthBtn = document.getElementById('btn-reauth');
@@ -66,7 +66,7 @@ function setFolderUI(name, isBound) {
   if (isBound) {
     badge.textContent = '已綁定';
     badge.className = 'folder-badge';
-    reauthBtn.style.display = 'inline-flex';
+    reauthBtn.style.display = showReauth ? 'inline-flex' : 'none';
   } else {
     badge.textContent = '未設定';
     badge.className = 'folder-badge unset';
@@ -218,8 +218,8 @@ async function refreshCurrentChatStatus() {
 
 async function init() {
   // 1. 讀取儲存的設定
-  const { backupInterval, lastBackupTime, fullBackupState } =
-    await chrome.storage.local.get(['backupInterval', 'lastBackupTime', 'fullBackupState']);
+  const { backupInterval, lastBackupTime, fullBackupState, folderName } =
+    await chrome.storage.local.get(['backupInterval', 'lastBackupTime', 'fullBackupState', 'folderName']);
 
   // 設定頻率下拉選單
   const select = document.getElementById('interval-select');
@@ -231,29 +231,23 @@ async function init() {
   document.getElementById('last-backup-time').textContent =
     formatBackupTime(lastBackupTime);
 
-  // 2. 讀取已儲存的 FileSystemDirectoryHandle
-  //    Chrome 在每次 popup 重開後可能將 permission 狀態重設為 "prompt"。
-  //    popup 本身由使用者點擊開啟，屬於 user gesture context，
-  //    可直接呼叫 requestPermission() 靜默重新授權，無需額外點擊。
+  // 2. 顯示資料夾名稱
+  //    Chrome 的 File System Access API permission 在每次 popup 重開後可能被重設，
+  //    在 init() 裡呼叫 requestPermission() 不可靠（async 操作消耗 user activation）。
+  //    改為：用 chrome.storage 快速顯示已儲存的資料夾名稱，
+  //    實際 permission 在使用者點擊備份按鈕時（有 user gesture）再處理。
   try {
-    const handle = await getHandleFromDB();
-    if (handle) {
-      let permission = await handle.queryPermission({ mode: 'readwrite' });
-      if (permission !== 'granted') {
-        try {
-          permission = await handle.requestPermission({ mode: 'readwrite' });
-        } catch (_) {
-          // User activation 過期時會拋例外，降級顯示重新授權按鈕
-        }
-      }
-      if (permission === 'granted') {
-        setFolderUI(handle.name, true);
-      } else {
-        setFolderUI(handle.name + '（需要重新授權）', false);
-        document.getElementById('btn-reauth').style.display = 'inline-flex';
-      }
+    const storedName = folderName || null;
+    if (storedName) {
+      setFolderUI(storedName, true);
     } else {
-      setFolderUI('尚未選擇資料夾', false);
+      const handle = await getHandleFromDB();
+      if (handle) {
+        setFolderUI(handle.name, true);
+        await chrome.storage.local.set({ folderName: handle.name });
+      } else {
+        setFolderUI('尚未選擇資料夾', false);
+      }
     }
   } catch (_) {
     setFolderUI('尚未選擇資料夾', false);
