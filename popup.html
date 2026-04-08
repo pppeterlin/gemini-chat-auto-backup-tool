@@ -137,26 +137,32 @@
     /* Select */
     .select-row {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 8px;
+      width: 100%;
     }
     .select-row label {
       font-size: 12px;
       color: #5f6368;
-      white-space: nowrap;
+      flex-shrink: 0;
     }
     select {
       flex: 1;
-      padding: 7px 10px;
+      min-width: 100px;
+      padding: 8px 10px;
       border: 1px solid #dadce0;
       border-radius: 6px;
-      font-size: 13px;
+      font-size: 12px;
       color: #202124;
       background: #fff;
       cursor: pointer;
       outline: none;
     }
-    select:focus { border-color: #D97757; box-shadow: 0 0 0 2px rgba(217,119,87,0.2); }
+    select:focus {
+      border-color: #D97757;
+      box-shadow: 0 0 0 2px rgba(217,119,87,0.2);
+    }
 
     /* Last backup */
     .last-backup {
