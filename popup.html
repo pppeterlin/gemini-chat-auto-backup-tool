@@ -20,7 +20,7 @@
     .header {
       background: linear-gradient(135deg, #D97757, #B85C3A);
       color: #fff;
-      padding: 14px 16px 12px;
+      padding: 12px 16px;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -137,26 +137,32 @@
     /* Select */
     .select-row {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 8px;
+      width: 100%;
     }
     .select-row label {
       font-size: 12px;
       color: #5f6368;
-      white-space: nowrap;
+      flex-shrink: 0;
     }
     select {
       flex: 1;
-      padding: 7px 10px;
+      min-width: 100px;
+      padding: 8px 10px;
       border: 1px solid #dadce0;
       border-radius: 6px;
-      font-size: 13px;
+      font-size: 12px;
       color: #202124;
       background: #fff;
       cursor: pointer;
       outline: none;
     }
-    select:focus { border-color: #D97757; box-shadow: 0 0 0 2px rgba(217,119,87,0.2); }
+    select:focus {
+      border-color: #D97757;
+      box-shadow: 0 0 0 2px rgba(217,119,87,0.2);
+    }
 
     /* Last backup */
     .last-backup {
@@ -261,22 +267,115 @@
       width: 0%;
     }
 
+    /* Language Selector */
+    .lang-selector {
+      position: relative;
+      display: inline-block;
+    }
+    .header .lang-selector {
+      margin-left: auto;
+    }
+    .lang-btn {
+      background: none;
+      border: 1.5px solid rgba(255,255,255,0.4);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 6px 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      transition: all 0.15s;
+      width: 32px;
+      height: 32px;
+    }
+    .header .lang-btn:hover {
+      border-color: #fff;
+      background: rgba(255,255,255,0.1);
+    }
+    .lang-dropdown {
+      position: absolute;
+      top: 100%;
+      right: -4px;
+      background: #fff;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      max-height: 340px;
+      overflow-y: auto;
+      z-index: 1000;
+      min-width: 160px;
+      display: none;
+      margin-top: 6px;
+    }
+    .lang-dropdown.show {
+      display: block;
+    }
+    .lang-option {
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #202124;
+      cursor: pointer;
+      transition: background 0.1s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .lang-option:hover {
+      background: #f1f3f4;
+    }
+    .lang-option.active {
+      background: #e8f0fe;
+      color: #D97757;
+      font-weight: 500;
+    }
+    .lang-option::before {
+      content: '';
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: transparent;
+    }
+    .lang-option.active::before {
+      background: #D97757;
+    }
+
     /* Footer */
     .footer {
-      padding: 8px 16px;
+      padding: 8px 12px;
       border-top: 1px solid #e0e0e0;
       font-size: 11px;
       color: #9aa0a6;
       text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 32px;
+    }
+    .footer span {
+      flex: 1;
     }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="header-icon"><img src="icon.png" alt="icon" /></div>
-    <div>
+    <div style="flex: 1;">
       <h1>Gemini Chat Backup</h1>
       <p>自動備份對話到本地 Markdown</p>
+    </div>
+    <div class="lang-selector" style="margin-left: auto;">
+      <button class="lang-btn" id="lang-toggle" title="Switch language">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M12 2a8 8 0 0 1 0 16"></path>
+          <path d="M2 12h20"></path>
+          <path d="M12 2a4.5 4.5 0 0 0 0 9"></path>
+          <path d="M12 13a4.5 4.5 0 0 0 0 9"></path>
+        </svg>
+      </button>
+      <div class="lang-dropdown" id="lang-dropdown"></div>
     </div>
   </div>
 
@@ -355,8 +454,11 @@
 
   </div>
 
-  <div class="footer">Manifest V3 &nbsp;·&nbsp; File System Access API</div>
+  <div class="footer">
+    <span>Manifest V3 &nbsp;·&nbsp; File System Access API</span>
+  </div>
 
+  <script src="i18n.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

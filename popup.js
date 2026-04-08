@@ -1,9 +1,15 @@
 // popup.js - Popup UI 邏輯
-// 負責資料夾選擇、設定儲存、手動備份觸發、全量備份、當前對話同步狀態
+// 負責資料夾選擇、設定儲存、手動備份觸發、全量備份、當前對話同步狀態、多語言
 
 const DB_NAME = 'gemini-backup-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'handles';
+
+// ── i18n 輔助函式 ─────────────────────────────────────────────────────────────
+
+function i18nText(key) {
+  return i18n.get(key);
+}
 
 // ── IndexedDB helpers ──────────────────────────────────────────────────────────
 
@@ -64,11 +70,11 @@ function setFolderUI(name, isBound, showReauth = false) {
   nameEl.className = isBound ? 'bound' : '';
 
   if (isBound) {
-    badge.textContent = '已綁定';
+    badge.textContent = i18nText('bound');
     badge.className = 'folder-badge';
     reauthBtn.style.display = showReauth ? 'inline-flex' : 'none';
   } else {
-    badge.textContent = '未設定';
+    badge.textContent = i18nText('notSet');
     badge.className = 'folder-badge unset';
     reauthBtn.style.display = 'none';
   }
@@ -88,7 +94,8 @@ function setBackupBtnLoading(loading) {
 function formatBackupTime(isoStr) {
   if (!isoStr) return '—';
   try {
-    return new Date(isoStr).toLocaleString('zh-TW', {
+    const currentLang = i18n.getCurrentLanguage();
+    return new Date(isoStr).toLocaleString(currentLang, {
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit',
     });
@@ -109,17 +116,17 @@ function setSyncStatus(status, lastSyncTime) {
 
   badge.className = `sync-badge ${status}`;
   if (status === 'never') {
-    badge.textContent = '未同步';
+    badge.textContent = i18nText('neverBackup');
     timeEl.textContent = '';
   } else if (status === 'syncing') {
-    badge.textContent = '同步中';
+    badge.textContent = i18nText('backing');
     timeEl.textContent = '';
   } else if (status === 'has-new') {
-    badge.textContent = '有新訊息未同步';
-    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
+    badge.textContent = i18nText('hasNew');
+    timeEl.textContent = lastSyncTime ? `${i18nText('lastBackup')}${formatBackupTime(lastSyncTime)}` : '';
   } else {
-    badge.textContent = '已同步';
-    timeEl.textContent = lastSyncTime ? `上次：${formatBackupTime(lastSyncTime)}` : '';
+    badge.textContent = i18nText('backed');
+    timeEl.textContent = lastSyncTime ? `${i18nText('lastBackup')}${formatBackupTime(lastSyncTime)}` : '';
   }
 }
 
@@ -135,16 +142,16 @@ function updateFullBackupUI(state) {
   if (!state || (!state.inProgress && !state.completedAt && !state.fatalError)) {
     // Never run
     btn.disabled = false;
-    btn.innerHTML = '&#128260; 同步所有歷史';
+    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
     progressDiv.style.display = 'none';
     return;
   }
 
   if (state.fatalError) {
     btn.disabled = false;
-    btn.innerHTML = '&#128260; 同步所有歷史';
+    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
     progressDiv.style.display = 'block';
-    progressText.textContent = `錯誤：${state.fatalError}`;
+    progressText.textContent = `${i18nText('error')}：${state.fatalError}`;
     progressText.style.color = '#c5221f';
     progressCurrent.textContent = '';
     progressBar.style.width = '0%';
@@ -153,39 +160,39 @@ function updateFullBackupUI(state) {
 
   if (state.inProgress) {
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> 備份中…';
+    btn.innerHTML = `<span class="spinner"></span> ${i18nText('backingUp')}`;
     progressDiv.style.display = 'block';
     progressText.style.color = '#5f6368';
 
     if (state.total === 0) {
-      progressText.textContent = '正在掃描對話清單…';
+      progressText.textContent = i18nText('scanning');
       progressBar.style.width = '0%';
     } else {
       const pct = Math.round((state.done / state.total) * 100);
-      const skippedNote = state.skipped > 0 ? `（略過已備份 ${state.skipped} 個）` : '';
-      progressText.textContent = `${state.done} / ${state.total} 完成 ${skippedNote}`;
+      const skippedNote = state.skipped > 0 ? `（${i18nText('skipped')}${state.skipped}${i18nText('dialogCount')}）` : '';
+      progressText.textContent = `${state.done} / ${state.total} ${i18nText('done')} ${skippedNote}`;
       progressBar.style.width = `${pct}%`;
     }
 
-    progressCurrent.textContent = state.currentTitle ? `處理中：「${state.currentTitle}」` : '';
+    progressCurrent.textContent = state.currentTitle ? `${i18nText('processing')}「${state.currentTitle}」` : '';
     return;
   }
 
   // Completed
   btn.disabled = false;
-  btn.innerHTML = '&#128260; 同步所有歷史';
+  btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
   progressDiv.style.display = 'block';
   progressText.style.color = '#188038';
 
   if (state.total === 0 && state.skipped > 0) {
-    progressText.textContent = `全部 ${state.skipped} 個對話已是最新，無需備份`;
+    progressText.textContent = `${i18nText('allDone')} ${state.skipped} ${i18nText('dialogCount')} ${i18nText('noNeedBackup')}`;
   } else {
-    const errNote = state.errors?.length ? `，${state.errors.length} 個失敗` : '';
-    const skippedNote = state.skipped > 0 ? `，略過 ${state.skipped} 個已備份` : '';
-    progressText.textContent = `完成！備份 ${state.done} 個對話${skippedNote}${errNote}`;
+    const errNote = state.errors?.length ? `，${state.errors.length} ${i18nText('failures')}` : '';
+    const skippedNote = state.skipped > 0 ? `，${i18nText('skipped')} ${state.skipped} ${i18nText('dialogCount')}` : '';
+    progressText.textContent = `${i18nText('completed')} ${state.done} ${i18nText('dialogCount')}${skippedNote}${errNote}`;
   }
   progressCurrent.textContent = state.completedAt
-    ? `完成時間：${formatBackupTime(state.completedAt)}`
+    ? `${i18nText('completedTime')}${formatBackupTime(state.completedAt)}`
     : '';
   progressBar.style.width = state.total > 0 ? '100%' : '0%';
 }
@@ -223,6 +230,11 @@ async function refreshCurrentChatStatus() {
 // ── Initialise ─────────────────────────────────────────────────────────────────
 
 async function init() {
+  // 0. 初始化多語言
+  await i18n.init();
+  initLanguageSelector();
+  updateUIText();
+
   // 1. 讀取儲存的設定
   const { backupInterval, lastBackupTime, fullBackupState, folderName } =
     await chrome.storage.local.get(['backupInterval', 'lastBackupTime', 'fullBackupState', 'folderName']);
@@ -252,7 +264,7 @@ async function init() {
         setFolderUI(handle.name, true);
         await chrome.storage.local.set({ folderName: handle.name });
       } else {
-        setFolderUI('尚未選擇資料夾', false);
+        setFolderUI(i18nText('folderNotSelected'), false);
       }
     }
   } catch (_) {
@@ -276,6 +288,102 @@ async function init() {
     );
     if (syncKeys.length) refreshCurrentChatStatus();
   });
+}
+
+// ── 語言選擇器初始化 ──────────────────────────────────────────────────────────
+
+function initLanguageSelector() {
+  const dropdown = document.getElementById('lang-dropdown');
+  const toggle = document.getElementById('lang-toggle');
+
+  // 填充語言選項
+  const langs = i18n.getLanguageList();
+  langs.forEach(lang => {
+    const option = document.createElement('div');
+    option.className = `lang-option ${lang.code === i18n.getCurrentLanguage() ? 'active' : ''}`;
+    option.textContent = lang.name;
+    option.dataset.lang = lang.code;
+    option.addEventListener('click', () => {
+      selectLanguage(lang.code);
+    });
+    dropdown.appendChild(option);
+  });
+
+  // 切換下拉菜單
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('show');
+  });
+
+  // 點擊外部關閉
+  document.addEventListener('click', () => {
+    dropdown.classList.remove('show');
+  });
+}
+
+async function selectLanguage(lang) {
+  i18n.setLanguage(lang);
+  updateUIText();
+
+  // 重新生成備份狀態文本（如果有進行中或完成的備份）
+  const { fullBackupState } = await chrome.storage.local.get('fullBackupState');
+  if (fullBackupState) {
+    updateFullBackupUI(fullBackupState);
+  }
+
+  // 更新 folder UI 文本
+  const { folderName } = await chrome.storage.local.get('folderName');
+  if (folderName) {
+    setFolderUI(folderName, true);
+  } else {
+    setFolderUI(i18nText('folderNotSelected'), false);
+  }
+
+  // 更新當前對話同步狀態文本
+  await refreshCurrentChatStatus();
+
+  // 更新 active 狀態
+  document.querySelectorAll('.lang-option').forEach(opt => {
+    opt.classList.toggle('active', opt.dataset.lang === lang);
+  });
+
+  // 關閉下拉菜單
+  document.getElementById('lang-dropdown').classList.remove('show');
+}
+
+// 更新所有 UI 文本
+function updateUIText() {
+  // Header & labels
+  document.querySelector('.header h1').textContent = i18nText('appName');
+  document.querySelector('.header p').textContent = i18nText('appDesc');
+
+  // Folder card
+  document.querySelectorAll('.card-label')[0].textContent = i18nText('backupFolder');
+  document.getElementById('btn-select-folder').textContent = `📁 ${i18nText('selectFolder')}`;
+  document.getElementById('btn-reauth').textContent = `🔐 ${i18nText('reauth')}`;
+
+  // Backup frequency card
+  document.querySelectorAll('.card-label')[1].textContent = i18nText('backupFreq');
+  document.querySelector('.select-row label').textContent = i18nText('autoBackup');
+
+  const select = document.getElementById('interval-select');
+  select.querySelector('option[value="0"]').textContent = i18nText('off');
+  select.querySelector('option[value="1"]').textContent = i18nText('every1h');
+  select.querySelector('option[value="4"]').textContent = i18nText('every4h');
+  select.querySelector('option[value="8"]').textContent = i18nText('every8h');
+  select.querySelector('option[value="24"]').textContent = i18nText('every24h');
+
+  // Current chat status
+  document.querySelectorAll('.card-label')[2].textContent = i18nText('currentStatus');
+
+  // Buttons
+  document.getElementById('btn-backup').textContent = `▶ ${i18nText('backupNow')}`;
+  document.querySelectorAll('.card-label')[3].textContent = i18nText('fullBackup');
+  document.getElementById('btn-full-backup').textContent = `🔄 ${i18nText('syncAll')}`;
+
+  // Last backup
+  document.querySelector('.last-backup').innerHTML =
+    `<span>⏰ ${i18nText('lastBackupTime')}</span><span id="last-backup-time">—</span>`;
 }
 
 // ── Event: 選擇資料夾 ──────────────────────────────────────────────────────────
