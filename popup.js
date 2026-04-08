@@ -1,9 +1,15 @@
 // popup.js - Popup UI 邏輯
-// 負責資料夾選擇、設定儲存、手動備份觸發、全量備份、當前對話同步狀態
+// 負責資料夾選擇、設定儲存、手動備份觸發、全量備份、當前對話同步狀態、多語言
 
 const DB_NAME = 'gemini-backup-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'handles';
+
+// ── i18n 輔助函式 ─────────────────────────────────────────────────────────────
+
+function i18nText(key) {
+  return i18n.get(key);
+}
 
 // ── IndexedDB helpers ──────────────────────────────────────────────────────────
 
@@ -223,6 +229,11 @@ async function refreshCurrentChatStatus() {
 // ── Initialise ─────────────────────────────────────────────────────────────────
 
 async function init() {
+  // 0. 初始化多語言
+  await i18n.init();
+  initLanguageSelector();
+  updateUIText();
+
   // 1. 讀取儲存的設定
   const { backupInterval, lastBackupTime, fullBackupState, folderName } =
     await chrome.storage.local.get(['backupInterval', 'lastBackupTime', 'fullBackupState', 'folderName']);
@@ -276,6 +287,85 @@ async function init() {
     );
     if (syncKeys.length) refreshCurrentChatStatus();
   });
+}
+
+// ── 語言選擇器初始化 ──────────────────────────────────────────────────────────
+
+function initLanguageSelector() {
+  const dropdown = document.getElementById('lang-dropdown');
+  const toggle = document.getElementById('lang-toggle');
+
+  // 填充語言選項
+  const langs = i18n.getLanguageList();
+  langs.forEach(lang => {
+    const option = document.createElement('div');
+    option.className = `lang-option ${lang.code === i18n.getCurrentLanguage() ? 'active' : ''}`;
+    option.textContent = lang.name;
+    option.dataset.lang = lang.code;
+    option.addEventListener('click', () => {
+      selectLanguage(lang.code);
+    });
+    dropdown.appendChild(option);
+  });
+
+  // 切換下拉菜單
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('show');
+  });
+
+  // 點擊外部關閉
+  document.addEventListener('click', () => {
+    dropdown.classList.remove('show');
+  });
+}
+
+function selectLanguage(lang) {
+  i18n.setLanguage(lang);
+  updateUIText();
+
+  // 更新 active 狀態
+  document.querySelectorAll('.lang-option').forEach(opt => {
+    opt.classList.toggle('active', opt.dataset.lang === lang);
+  });
+
+  // 關閉下拉菜單
+  document.getElementById('lang-dropdown').classList.remove('show');
+}
+
+// 更新所有 UI 文本
+function updateUIText() {
+  // Header & labels
+  document.querySelector('.header h1').textContent = i18nText('appName');
+  document.querySelector('.header p').textContent = i18nText('appDesc');
+
+  // Folder card
+  document.querySelectorAll('.card-label')[0].textContent = i18nText('backupFolder');
+  document.getElementById('btn-select-folder').textContent = `📁 ${i18nText('selectFolder')}`;
+  document.getElementById('btn-reauth').textContent = `🔐 ${i18nText('reauth')}`;
+
+  // Backup frequency card
+  document.querySelectorAll('.card-label')[1].textContent = i18nText('backupFreq');
+  document.querySelector('.select-row label').textContent = i18nText('autoBackup');
+
+  const select = document.getElementById('interval-select');
+  select.querySelector('option[value="0"]').textContent = i18nText('off');
+  select.querySelector('option[value="1"]').textContent = i18nText('every1h');
+  select.querySelector('option[value="4"]').textContent = i18nText('every4h');
+  select.querySelector('option[value="8"]').textContent = i18nText('every8h');
+  select.querySelector('option[value="24"]').textContent = i18nText('every24h');
+
+  // Current chat status
+  document.querySelectorAll('.card-label')[2].textContent = i18nText('currentStatus');
+
+  // Buttons
+  document.getElementById('btn-backup').textContent = `▶ ${i18nText('backupNow')}`;
+  document.querySelectorAll('.card-label')[3].textContent = i18nText('fullBackup');
+  document.getElementById('btn-full-backup').textContent = `🔄 ${i18nText('syncAll')}`;
+
+  // Last backup
+  document.querySelector('.last-backup').innerHTML =
+    `<span>⏰ ${i18nText('lastBackupTime')}</span><span id="last-backup-time">—</span>`;
 }
 
 // ── Event: 選擇資料夾 ──────────────────────────────────────────────────────────

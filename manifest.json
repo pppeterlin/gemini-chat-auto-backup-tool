@@ -5,6 +5,12 @@
   "description": "自動將 Google Gemini 對話備份為 Markdown 格式到本地資料夾",
   "permissions": ["storage", "alarms", "scripting", "tabs"],
   "host_permissions": ["https://gemini.google.com/*"],
+  "web_accessible_resources": [
+    {
+      "resources": ["i18n/messages.json"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "background": {
     "service_worker": "background.js"
   },
