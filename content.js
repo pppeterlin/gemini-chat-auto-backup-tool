@@ -139,9 +139,12 @@
     }
 
     // 3. 側邊欄中目前選取的對話連結（對 Gem 對話最可靠，避免抓到 Gem 名稱）
+    //    優先 aria-label（通常包含完整對話標題），再 fallback 到 textContent
     for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
       if (el.getAttribute('aria-current') === 'page' ||
           el.getAttribute('aria-selected') === 'true') {
+        const ariaLabel = el.getAttribute('aria-label')?.trim();
+        if (ariaLabel && ariaLabel.length >= 2 && ariaLabel.length <= 200) return ariaLabel;
         const text = el.textContent?.trim();
         if (text && text.length >= 2 && text.length <= 120) return text;
       }
