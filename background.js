@@ -62,18 +62,16 @@ function extractChatId(url) {
   return match ? match[1] : null;
 }
 
-// Scroll to the top of the conversation to trigger lazy-loading of older messages.
+// Load the full conversation history before extracting content.
 //
-// How Gemini lazy-loading works (confirmed via Voyager):
-//   - Scrolling to the topmost loaded message triggers the room to fetch earlier history.
-//   - When new messages are prepended, the browser pushes the viewport DOWN
-//     (scrollTop increases) to keep the current view stable.
-//   - We exploit this: set scrollTop=0, then wait. If scrollTop becomes > 0,
-//     new content was prepended → scroll to top again and repeat.
-//   - If scrollTop stays at 0 after the timeout → no more history to load.
+// Strategy A – Voyager timeline (preferred):
+//   Voyager injects `.timeline-dot` buttons; clicking the first one jumps to the
+//   earliest loaded turn and triggers Gemini to fetch older history.
+//   We repeat until the dot count stops increasing (= no more history).
 //
-// Also falls back to DOM element count comparison for cases where
-// the browser doesn't adjust scrollTop automatically.
+// Strategy B – Manual scrollTop fallback (no Voyager):
+//   Set scrollTop = 0, wait. When new messages are prepended the browser pushes
+//   the viewport down (scrollTop > 0). Repeat until no shift detected.
 async function scrollToLoadAllMessages(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -83,7 +81,41 @@ async function scrollToLoadAllMessages(tabId) {
         'button[aria-label="Expand"], button[aria-label="展開"]'
       ).forEach(b => { try { b.click(); } catch (_) {} });
 
-      // Find scrollable container (CDK virtual scroll viewport takes priority)
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+
+      // ── Strategy A: Voyager timeline dots ───────────────────────────────────
+      const getFirstDot = () => document.querySelector('.timeline-dot[data-marker-index="0"]')
+                              || document.querySelector('.timeline-dot');
+
+      if (getFirstDot()) {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const dot = getFirstDot();
+          if (!dot) break;
+
+          const prevCount = document.querySelectorAll('.timeline-dot').length;
+          dot.click(); // Jump to earliest loaded turn → Gemini fetches older history
+
+          // Wait up to 8 s for new dots to appear (new turns = new dots)
+          let newDotsFound = false;
+          for (let t = 0; t < 16; t++) {
+            await wait(500);
+            if (document.querySelectorAll('.timeline-dot').length > prevCount) {
+              newDotsFound = true;
+              break;
+            }
+          }
+
+          if (!newDotsFound) break; // Dot count stable → full history loaded
+        }
+
+        // Click the LAST dot to restore view to the most recent message
+        const dots = document.querySelectorAll('.timeline-dot');
+        if (dots.length) dots[dots.length - 1].click();
+        await wait(500);
+        return;
+      }
+
+      // ── Strategy B: Manual scroll fallback ──────────────────────────────────
       const scrollEl = [
         document.querySelector('.cdk-virtual-scroll-viewport'),
         document.querySelector('main'),
@@ -92,7 +124,6 @@ async function scrollToLoadAllMessages(tabId) {
         document.documentElement,
       ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
 
-      // Count conversation turns currently in DOM (for fallback detection)
       function countTurns() {
         return Math.max(
           document.querySelectorAll('user-query').length,
@@ -102,36 +133,30 @@ async function scrollToLoadAllMessages(tabId) {
         );
       }
 
-      const origScrollTop = scrollEl.scrollTop;
       let prevTurnCount = countTurns();
 
-      // While loop: keep scrolling to top until no new content appears
       for (let attempt = 0; attempt < 30; attempt++) {
         scrollEl.scrollTop = 0;
         window.scrollTo(0, 0);
 
-        // Wait up to 8 seconds for new content (poll every 500 ms)
         let newContentFound = false;
         for (let t = 0; t < 16; t++) {
-          await new Promise(r => setTimeout(r, 500));
-
-          const currTurns = countTurns();
-          // Primary signal: scrollTop shifted (browser pushed view down after prepend)
-          // Fallback signal: more DOM elements than before
-          if (scrollEl.scrollTop > 0 || currTurns > prevTurnCount) {
-            prevTurnCount = Math.max(prevTurnCount, currTurns);
+          await wait(500);
+          const curr = countTurns();
+          if (scrollEl.scrollTop > 0 || curr > prevTurnCount) {
+            prevTurnCount = Math.max(prevTurnCount, curr);
             newContentFound = true;
             break;
           }
         }
 
-        if (!newContentFound) break; // No new content after full wait → history complete
+        if (!newContentFound) break;
       }
 
-      // Restore to bottom of conversation
+      // Restore to bottom
       scrollEl.scrollTop = scrollEl.scrollHeight;
       window.scrollTo(0, document.body.scrollHeight);
-      await new Promise(r => setTimeout(r, 500));
+      await wait(500);
     },
   });
 }
