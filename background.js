@@ -311,6 +311,57 @@ async function performBackup() {
   }
 }
 
+// ── Scroll sidebar to load all conversation links ─────────────────────────────
+//
+// Gemini's sidebar uses CDK virtual scroll — older conversations are only in the
+// DOM once you scroll down far enough.  We scroll the sidebar container to the
+// bottom, wait for new links, and repeat until the count stabilises.
+
+async function scrollSidebarToLoadAll(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+
+      // Find the sidebar scroll container (try several known selectors)
+      function findSidebarEl() {
+        const candidates = [
+          document.querySelector('.conversations-list'),
+          document.querySelector('mat-sidenav .conversations'),
+          document.querySelector('[data-test-id="sidebar"] [cdkvirtualscrollviewport]'),
+          document.querySelector('infinite-scroller'),
+          document.querySelector('.conversation-list'),
+          document.querySelector('nav'),
+          // Broadest fallback: leftmost tall scrollable element
+          ...Array.from(document.querySelectorAll('*')).filter(el => {
+            const r = el.getBoundingClientRect();
+            return r.left < 300 && r.height > 400 && el.scrollHeight > el.clientHeight + 100;
+          }),
+        ].filter(Boolean);
+        return candidates[0] || null;
+      }
+
+      const sidebarEl = findSidebarEl();
+      if (!sidebarEl) return; // Can't find sidebar — give up gracefully
+
+      let prevCount = document.querySelectorAll('a[href*="/app/"]').length;
+
+      for (let attempt = 0; attempt < 30; attempt++) {
+        sidebarEl.scrollTop = sidebarEl.scrollHeight;
+        await wait(1200);
+
+        const newCount = document.querySelectorAll('a[href*="/app/"]').length;
+        if (newCount === prevCount) break; // Stable — all conversations loaded
+        prevCount = newCount;
+      }
+
+      // Scroll back to top so the sidebar looks normal for the user
+      sidebarEl.scrollTop = 0;
+      await wait(300);
+    },
+  });
+}
+
 // ── Full history backup ────────────────────────────────────────────────────────
 
 async function performFullHistoryBackup() {
@@ -364,6 +415,11 @@ async function performFullHistoryBackup() {
     const tabId = tab.id;
     const originalUrl = tab.url;
 
+    // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
+    try {
+      await scrollSidebarToLoadAll(tabId);
+    } catch (_) {} // Non-fatal — scan whatever is visible if this fails
+
     // Scan sidebar for conversation list
     let conversations;
     try {
@@ -408,7 +464,9 @@ async function performFullHistoryBackup() {
       await saveState();
 
       try {
-        await navigateAndWait(tabId, conv.url, 2500);
+        // Use longer wait for Gem chats (they need more time to render)
+        const isGemChat = conv.url.includes('/gem/');
+        await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
         // Scroll to load all lazy-loaded messages after page settles
         await scrollToLoadAllMessages(tabId);
 
@@ -421,10 +479,13 @@ async function performFullHistoryBackup() {
         if (!data?.content) {
           state.errors.push(`${conv.title}: 無法擷取內容`);
         } else {
-          const { title, content, hash, url, messages } = data;
+          const { content, hash, url, messages } = data;
           const storageKey = `hash_${encodeURIComponent(url)}`;
           const convId = stableConvId(url || conv.url);
-          const safeTitle = (title || conv.title).replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+          // Prefer sidebar title (conv.title) for filename — it's more reliable
+          // than what content.js scrapes (Gem chats often return the Gem name)
+          const filenameTitle = conv.title || data.title || '未命名對話';
+          const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
           const filename = `${safeTitle}_${convId}.md`; // always stable, never timestamped
 
           const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
