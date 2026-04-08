@@ -167,38 +167,20 @@ async function backupSingleTab(tab, dirHandle) {
   const currMsgCount = messages ? messages.length : 0;
   const now = new Date().toISOString();
 
-  let writeContent = content;
-  let appended = false;
-
-  if (prevMsgCount > 0 && messages && currMsgCount > prevMsgCount) {
-    // Append only new messages to the existing file
-    let existingContent = '';
-    try {
-      const existingHandle = await dirHandle.getFileHandle(filename, { create: false });
-      existingContent = await (await existingHandle.getFile()).text();
-    } catch (_) {
-      // File was deleted — fall through to full write
-    }
-
-    if (existingContent) {
-      const appendTime = new Date().toLocaleString('zh-TW', {
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-      });
-      let appendMd = `\n\n---\n\n> **追加備份時間：** ${appendTime}\n\n`;
-      const newMessages = messages.slice(prevMsgCount);
-      for (const msg of newMessages) {
-        const label = msg.role === 'user' ? '使用者' : 'Gemini';
-        appendMd += `## ${label}\n\n${msg.markdown}\n\n`;
-      }
-      writeContent = existingContent.trimEnd() + appendMd;
-      appended = true;
-    }
+  // Safety guard: Gemini lazy-loads OLD messages upward, so indices shift on each scroll.
+  // Appending by index is unreliable. Instead, always do a full rewrite — but only when
+  // we have at least as many messages as before (proving scroll-to-load was complete).
+  // If currMsgCount < prevMsgCount the scroll didn't finish; skip to protect the existing backup.
+  if (prevMsgCount > 0 && currMsgCount < prevMsgCount) {
+    return {
+      skipped: true,
+      reason: `捲動未完整載入（${currMsgCount} / ${prevMsgCount} 條訊息），保留現有備份`,
+    };
   }
 
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(writeContent);
+  await writable.write(content);
   await writable.close();
 
   const updates = { [storageKey]: hash };
@@ -209,7 +191,7 @@ async function backupSingleTab(tab, dirHandle) {
   }
   await chrome.storage.local.set(updates);
 
-  return { saved: true, filename, appended };
+  return { saved: true, filename };
 }
 
 // ── Core backup logic (current open tabs) ──────────────────────────────────────

@@ -128,18 +128,23 @@
 
   // ── 擷取對話標題 ──────────────────────────────────────────────────────────────
   function getTitle() {
-    // 依優先順序嘗試各種選擇器
-    const titleSelectors = [
-      '.conversation-title',
-      '[data-conversation-title]',
-      'h1',
-      '.chat-title',
-    ];
-    for (const sel of titleSelectors) {
-      const el = document.querySelector(sel);
+    // 1. 明確的對話標題選擇器（穿透 Shadow DOM）
+    for (const sel of ['.conversation-title', '[data-conversation-title]', '.chat-title']) {
+      const el = queryShadowAll(document, sel)[0];
       if (el?.textContent?.trim()) return el.textContent.trim();
     }
-    // Fallback: 從 <title> 移除 " - Gemini" 後綴
+
+    // 2. 側邊欄中目前選取的對話連結（對 Gem 對話最可靠）
+    //    Gemini 的 active 對話項目通常帶有 aria-current="page" 或 aria-selected="true"
+    for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
+      if (el.getAttribute('aria-current') === 'page' ||
+          el.getAttribute('aria-selected') === 'true') {
+        const text = el.textContent?.trim();
+        if (text && text.length >= 2 && text.length <= 120) return text;
+      }
+    }
+
+    // 3. Fallback: 從 <title> 移除 " - Gemini" / "Gem名稱 - Gemini" 後綴
     return document.title.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim() || '未命名對話';
   }
 
