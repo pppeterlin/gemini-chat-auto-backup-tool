@@ -495,20 +495,23 @@ async function performFullHistoryBackup(limitCount = 0) {
     state.skipped = 0;
     await saveState();
 
+    // ── 手動停止 helper ───────────────────────────────────────────────────────────
+    // 清除停止旗標、更新狀態、導回原始頁面
+    async function handleStop() {
+      await chrome.storage.local.remove('stopBackupRequested');
+      state.inProgress = false;
+      state.stoppedByUser = true;
+      state.currentTitle = '';
+      state.currentUrl = '';
+      state.completedAt = new Date().toISOString();
+      await saveState();
+      try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+    }
+
     for (const conv of candidateConvs) {
-      // 每次迭代前檢查是否收到手動停止請求
-      const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
-      if (stopBackupRequested) {
-        await chrome.storage.local.remove('stopBackupRequested');
-        state.inProgress = false;
-        state.stoppedByUser = true;
-        state.currentTitle = '';
-        state.currentUrl = '';
-        state.completedAt = new Date().toISOString();
-        await saveState();
-        try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
-        return;
-      }
+      // ── Stop check #1：每次迭代開始前確認 ──
+      { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+        if (s) { await handleStop(); return; } }
 
       state.currentTitle = conv.title;
       state.currentUrl = conv.url;
@@ -527,6 +530,10 @@ async function performFullHistoryBackup(limitCount = 0) {
 
         const isGemChat = conv.url.includes('/gem/');
         await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
+
+        // ── Stop check #2：navigate 完成後立即確認（navigate 本身耗時 2~4 秒）──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
 
         // ── 快速比對：若曾備份過，先數可見訊息數量決定是否需要 scroll ──
         // scrollToLoadAllMessages 很耗時，盡量跳過
@@ -551,11 +558,19 @@ async function performFullHistoryBackup(limitCount = 0) {
           }
         }
 
+        // ── Stop check #3：scroll 前確認（scroll 可能是最耗時的步驟）──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
+
         if (needFullScroll) {
           // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
           // prevMsgCount = 0 表示從未備份，會退回為全量捲動
           await scrollToLoadAllMessages(tabId, prevMsgCount);
         }
+
+        // ── Stop check #4：scroll 完成後、extract 前 ──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
