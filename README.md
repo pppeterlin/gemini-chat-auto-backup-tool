@@ -15,6 +15,7 @@
 | **手動備份** | 點「立即備份」，一次備份所有已開啟的 Gemini 分頁 |
 | **單一對話備份** | 開啟任一對話頁面後點「立即備份」，即可備份該對話 |
 | **全量歷史備份** | 點「同步所有歷史」，自動掃描側邊欄所有對話並逐一備份 |
+| **部分歷史備份** | 選擇「前 5 / 10 / 20 / 30 個」，僅備份最近 N 則對話（Pinned 對話永遠包含在內） |
 | **自動排程備份** | 設定每 1 / 4 / 8 / 24 小時自動執行，無需手動操作 |
 
 ### 智慧偵測
@@ -22,6 +23,8 @@
 - **未同步提示**：若當前對話自上次備份後新增了訊息，Popup 會顯示「有新訊息未同步」提醒
 - **增量備份**：自動比對內容變更，相同內容不重複寫入，節省磁碟空間
 - **訊息完整性保護**：若頁面捲動未完整載入，會保留訊息較多的現有備份，避免資料遺失
+- **快速略過最佳化**：全量備份時先快速計算可見訊息數，若無新訊息則跳過耗時捲動，顯著提升備份速度
+- **Pinned 對話自動識別**：部分備份模式下，Pinned 對話自動加入備份範圍，不受 N 個限制影響
 
 ### 輸出格式
 
@@ -59,16 +62,20 @@
 
 開啟任一 Gemini 對話頁面，點「**立即備份**」即可。若同時開著多個 Gemini 分頁，會一次全部備份。
 
-### 全量歷史備份
+### 全量 / 部分歷史備份
 
-點「**同步所有歷史**」，擴充套件會自動：
+在「歷史備份」區塊：
 
-1. 掃描側邊欄中的所有對話連結
-2. 逐一開啟並捲動，觸發舊訊息載入
-3. 備份完整對話內容，跳過已是最新的對話
-4. 在 Popup 即時顯示進度
+1. 從「備份範圍」下拉選單選擇要備份的數量（**全部** 或**前 5 / 10 / 20 / 30 個**）
+2. 點「**同步所有歷史**」（按鈕文字會隨選擇動態變化）
+3. 擴充套件會自動：
+   - 掃描側邊欄對話清單（Pinned 對話永遠包含在備份範圍內）
+   - 逐一開啟對話，智慧判斷是否有新訊息
+   - 備份有更新的對話，跳過已是最新的對話
+   - 在 Popup 即時顯示進度
+4. 備份進行中可點「**停止備份**」隨時中止
 
-> 全量備份期間請勿關閉 Gemini 分頁。
+> 備份期間請勿關閉 Gemini 分頁。
 
 ### 自動備份
 
@@ -109,7 +116,30 @@ $JSC test/run_tests.js
 
 - Gemini 的 DOM 結構不定期更新，若備份失敗請回報 Issue
 - File System Access API 的資料夾授權在瀏覽器重啟後可能需要重新點擊備份按鈕以觸發重新授權
-- 全量備份期間請勿關閉 Gemini 分頁
+- 備份期間請勿關閉 Gemini 分頁
+
+---
+
+## Changelog
+
+### v1.1.0 — 2026-04-16
+
+#### 新增功能
+- **部分歷史備份**：新增「備份範圍」選單，可選擇僅備份最近 5 / 10 / 20 / 30 個對話，不必每次全量掃描
+- **Pinned 對話優先備份**：部分備份模式下，已釘選（Pinned）的對話自動納入備份範圍，不受 N 個限制影響
+- **手動停止備份**：備份進行中可隨時點「停止備份」中止程序
+- **異常狀態自動復原**：瀏覽器重啟或 Service Worker 中斷後，重開 Popup 會自動偵測並清除卡住的備份狀態
+
+#### 效能改善
+- **全量備份大幅提速**：對已備份過的對話，先快速計算可見訊息數量；若無新訊息則直接跳過耗時的全頁捲動，速度可提升數倍
+- 修正：全量備份之前只備份「從未備份過」的對話，導致有新訊息的舊對話被遺漏
+
+### v1.0.0 — 2026-04-08
+
+- 初始發布
+- 支援手動備份、全量歷史備份、自動排程備份
+- 多語言介面（繁中 / 簡中 / 英 / 日 / 韓 / 法 / 西 / 葡 / 阿 / 俄）
+- 增量備份、訊息完整性保護
 
 ---
 
@@ -136,6 +166,7 @@ A Chrome extension that automatically backs up your [Google Gemini](https://gemi
 | **Manual Backup** | Click "Backup Now" to back up all currently open Gemini tabs at once |
 | **Single Chat Backup** | Open any conversation and click "Backup Now" to back up that chat |
 | **Full History Backup** | Click "Sync All History" to scan the sidebar and back up every conversation automatically |
+| **Partial History Backup** | Choose "Latest 5 / 10 / 20 / 30" to back up only the most recent N conversations (Pinned chats are always included) |
 | **Scheduled Auto-Backup** | Set an interval (1 / 4 / 8 / 24 hours) to run backups automatically in the background |
 
 ### Smart Detection
@@ -143,6 +174,8 @@ A Chrome extension that automatically backs up your [Google Gemini](https://gemi
 - **Unsynced message alert**: If new messages have been added to the current conversation since the last backup, the popup shows a "New messages not backed up" warning
 - **Incremental backup**: Content is hashed on each run — unchanged conversations are skipped to save disk space
 - **Message integrity guard**: If the page didn't fully scroll to load all messages, the existing backup with more messages is preserved
+- **Fast-skip optimization**: During full history backup, the extension quickly counts visible messages before triggering a full scroll — if no new messages are detected, the expensive scroll is skipped entirely, making backups significantly faster
+- **Pinned chat detection**: In partial backup mode, Pinned conversations are automatically included regardless of the N-chat limit
 
 ### Output
 
@@ -180,16 +213,20 @@ Not yet published to the Chrome Web Store. Load manually via Developer Mode:
 
 Open any Gemini conversation, then click **"Backup Now"**. If multiple Gemini tabs are open, all of them will be backed up in one go.
 
-### Full History Backup
+### Full / Partial History Backup
 
-Click **"Sync All History"**. The extension will automatically:
+In the "History Backup" section:
 
-1. Scan the sidebar for all conversation links
-2. Open each one and scroll to trigger full message loading
-3. Back up each conversation, skipping ones that are already up to date
-4. Show real-time progress in the popup
+1. Choose a **backup scope** from the dropdown (**All** or **Latest 5 / 10 / 20 / 30**)
+2. Click the sync button (its label updates to match your selection)
+3. The extension will automatically:
+   - Scan the sidebar for conversation links (Pinned chats are always included)
+   - Open each conversation and intelligently check for new messages
+   - Back up updated conversations, skipping ones already up to date
+   - Show real-time progress in the popup
+4. Click **"Stop Backup"** at any time to cancel
 
-> Do not close the Gemini tab while a full history backup is running.
+> Do not close the Gemini tab while a backup is running.
 
 ### Auto-Backup
 
@@ -230,7 +267,7 @@ $JSC test/run_tests.js
 
 - Gemini's DOM structure changes periodically — if backups fail, please open an Issue
 - The folder write permission granted via File System Access API may need to be re-confirmed after a browser restart (just click "Backup Now" again to trigger re-authorization)
-- Do not close the Gemini tab during a full history backup
+- Do not close the Gemini tab while a backup is running
 
 ---
 

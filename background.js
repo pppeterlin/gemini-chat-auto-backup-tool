@@ -364,7 +364,8 @@ async function scrollSidebarToLoadAll(tabId) {
 
 // ── Full history backup ────────────────────────────────────────────────────────
 
-async function performFullHistoryBackup() {
+// limitCount: 0 = 全部；> 0 = 僅備份非 Pinned 的前 N 個（Pinned 永遠全備份）
+async function performFullHistoryBackup(limitCount = 0) {
   // Prevent duplicate runs
   const { fullBackupState: running } = await chrome.storage.local.get('fullBackupState');
   if (running?.inProgress) return;
@@ -373,16 +374,22 @@ async function performFullHistoryBackup() {
     inProgress: true,
     total: 0,
     done: 0,
-    skipped: 0,
+    skipped: 0,       // 已有備份、hash 吻合，跳過
+    excluded: 0,      // 超出 N 個限制、本次不處理（不是真的遺漏）
+    pinnedCount: 0,
+    selectedLimit: limitCount,
     currentTitle: '',
     currentUrl: '',
     startedAt: new Date().toISOString(),
+    lastUpdated: new Date().toISOString(),
     errors: [],
     fatalError: null,
+    stoppedByUser: false,
   };
   await chrome.storage.local.set({ fullBackupState: state });
 
   async function saveState() {
+    state.lastUpdated = new Date().toISOString();
     await chrome.storage.local.set({ fullBackupState: { ...state } });
   }
 
@@ -442,33 +449,83 @@ async function performFullHistoryBackup() {
       return;
     }
 
-    // Identify which conversations have never been backed up
-    const allKeys = conversations.map(c => `hash_${encodeURIComponent(c.url)}`);
-    const existingHashes = await chrome.storage.local.get(allKeys);
-    const toProcess = conversations.filter(c => !existingHashes[`hash_${encodeURIComponent(c.url)}`]);
+    // 分離 Pinned 與非 Pinned 對話
+    // Pinned 對話永遠全備份；非 Pinned 依 limitCount 截取前 N 個（0 = 全部）
+    const pinnedConvs = conversations.filter(c => c.pinned);
+    const nonPinnedConvs = conversations.filter(c => !c.pinned);
+    const limitedNonPinned = limitCount > 0 ? nonPinnedConvs.slice(0, limitCount) : nonPinnedConvs;
+    const candidateConvs = [...pinnedConvs, ...limitedNonPinned];
 
-    state.total = toProcess.length;
-    state.skipped = conversations.length - toProcess.length;
+    state.pinnedCount = pinnedConvs.length;
+    // 超出 limit 的非 Pinned 對話（本次不處理，但不是錯誤）
+    state.excluded = conversations.length - candidateConvs.length;
+
+    // 全部候選對話都需要導航過去比對 hash——
+    // 不能在這裡預先過濾「已備份」，因為對話可能自上次備份後有新訊息。
+    // 真正的「跳過」判斷在導航後拿到 content.js 結果再比對。
+    state.total = candidateConvs.length;
+    state.skipped = 0;
     await saveState();
 
-    if (toProcess.length === 0) {
-      state.inProgress = false;
-      state.completedAt = new Date().toISOString();
-      await saveState();
-      return;
-    }
+    for (const conv of candidateConvs) {
+      // 每次迭代前檢查是否收到手動停止請求
+      const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
+      if (stopBackupRequested) {
+        await chrome.storage.local.remove('stopBackupRequested');
+        state.inProgress = false;
+        state.stoppedByUser = true;
+        state.currentTitle = '';
+        state.currentUrl = '';
+        state.completedAt = new Date().toISOString();
+        await saveState();
+        try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+        return;
+      }
 
-    for (const conv of toProcess) {
       state.currentTitle = conv.title;
       state.currentUrl = conv.url;
       await saveState();
 
       try {
-        // Use longer wait for Gem chats (they need more time to render)
+        const convId = stableConvId(conv.url);
+        const storageKey = `hash_${encodeURIComponent(conv.url)}`;
+
+        // 先取出已儲存的 hash 和 msg count（不需要等 navigation）
+        const stored = await chrome.storage.local.get([
+          storageKey,
+          `chatFilename_${convId}`,
+          `chatMsgCount_${convId}`,
+        ]);
+
         const isGemChat = conv.url.includes('/gem/');
         await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
-        // Scroll to load all lazy-loaded messages after page settles
-        await scrollToLoadAllMessages(tabId);
+
+        // ── 快速比對：若曾備份過，先數可見訊息數量決定是否需要 scroll ──
+        // scrollToLoadAllMessages 很耗時，盡量跳過
+        const prevMsgCount = stored[`chatMsgCount_${convId}`] || 0;
+        const hasPrevBackup = !!stored[storageKey] && prevMsgCount > 0;
+
+        let needFullScroll = !hasPrevBackup; // 從未備份過 → 一定要 scroll
+
+        if (hasPrevBackup) {
+          try {
+            const [countResult] = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: countMessagesOnPage,
+            });
+            const quickCount = countResult?.result || 0;
+            if (quickCount > prevMsgCount) {
+              needFullScroll = true; // 有新訊息，需要 scroll 才能全量擷取
+            }
+            // quickCount <= prevMsgCount → 沒有新訊息，跳過 scroll
+          } catch (_) {
+            needFullScroll = true; // 計數失敗就保守地做完整 scroll
+          }
+        }
+
+        if (needFullScroll) {
+          await scrollToLoadAllMessages(tabId);
+        }
 
         const results = await chrome.scripting.executeScript({
           target: { tabId },
@@ -480,13 +537,29 @@ async function performFullHistoryBackup() {
           state.errors.push(`${conv.title}: 無法擷取內容`);
         } else {
           const { content, hash, url, messages } = data;
-          const storageKey = `hash_${encodeURIComponent(url)}`;
-          const convId = stableConvId(url || conv.url);
-          // Prefer sidebar title (conv.title) for filename — it's more reliable
-          // than what content.js scrapes (Gem chats often return the Gem name)
+          const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
+
+          // hash 一致 → 內容確認沒有變化，跳過
+          if (stored[storageKey] === hash) {
+            state.skipped++;
+            state.done++;
+            await saveState();
+            continue;
+          }
+
+          // msg count 回退保護（scroll 未完整載入）
+          const currMsgCount = messages ? messages.length : 0;
+          if (prevMsgCount > 0 && currMsgCount < prevMsgCount) {
+            state.skipped++;
+            state.done++;
+            await saveState();
+            continue;
+          }
+
+          // Prefer sidebar title for filename (more reliable for Gem chats)
           const filenameTitle = conv.title || data.title || '未命名對話';
           const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-          const filename = `${safeTitle}_${convId}.md`; // always stable, never timestamped
+          const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
 
           const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
           const writable = await fileHandle.createWritable();
@@ -495,9 +568,9 @@ async function performFullHistoryBackup() {
 
           const now = new Date().toISOString();
           await chrome.storage.local.set({
-            [storageKey]: hash,
+            [realStorageKey]: hash,
             [`chatFilename_${convId}`]: filename,
-            [`chatMsgCount_${convId}`]: messages ? messages.length : 0,
+            [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
           });
         }
@@ -556,8 +629,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.action === 'startFullBackup') {
-    performFullHistoryBackup(); // fire-and-forget; progress tracked in storage
+    const limitCount = message.limitCount || 0;
+    performFullHistoryBackup(limitCount); // fire-and-forget; progress tracked in storage
     sendResponse({ started: true });
+    return true;
+  }
+
+  if (message.action === 'stopFullBackup') {
+    chrome.storage.local.set({ stopBackupRequested: true });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.action === 'resetFullBackupState') {
+    chrome.storage.local.remove(['stopBackupRequested', 'fullBackupState'], () => {
+      sendResponse({ ok: true });
+    });
     return true;
   }
 
@@ -638,7 +725,21 @@ function countMessagesOnPage() {
 }
 
 // Restore alarm on service worker restart
+// Also clear any stuck inProgress state — if the service worker restarted,
+// the backup loop is definitely no longer running.
 chrome.runtime.onStartup.addListener(async () => {
-  const { backupInterval } = await chrome.storage.local.get('backupInterval');
+  const { backupInterval, fullBackupState } = await chrome.storage.local.get(['backupInterval', 'fullBackupState']);
   if (backupInterval) await setupAlarm(backupInterval);
+  if (fullBackupState?.inProgress) {
+    await chrome.storage.local.set({
+      fullBackupState: {
+        ...fullBackupState,
+        inProgress: false,
+        stoppedByUser: false,
+        fatalError: 'browserRestart',
+      },
+    });
+  }
+  // Clear any leftover stop flag
+  await chrome.storage.local.remove('stopBackupRequested');
 });

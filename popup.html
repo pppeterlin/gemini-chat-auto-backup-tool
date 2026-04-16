@@ -431,8 +431,21 @@
     <!-- 同步所有歷史 -->
     <div class="card">
       <div class="card-label">歷史備份</div>
+      <div class="select-row" style="margin-bottom: 8px;">
+        <label for="full-backup-limit">備份範圍：</label>
+        <select id="full-backup-limit">
+          <option value="0">全部</option>
+          <option value="5">前 5 個</option>
+          <option value="10">前 10 個</option>
+          <option value="20">前 20 個</option>
+          <option value="30">前 30 個</option>
+        </select>
+      </div>
       <button id="btn-full-backup" class="btn btn-primary">
         &#128260; 同步所有歷史
+      </button>
+      <button id="btn-stop-backup" class="btn btn-secondary" style="display:none; margin-top: 6px;">
+        &#9209; 停止備份
       </button>
       <div id="full-backup-progress" style="display:none;">
         <div class="progress-text" id="progress-text">準備中…</div>
