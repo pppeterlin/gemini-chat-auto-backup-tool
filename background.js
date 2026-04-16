@@ -86,10 +86,15 @@ function stableConvId(url) {
 // Strategy B – Manual scrollTop fallback (no Voyager):
 //   Set scrollTop = 0, wait. When new messages are prepended the browser pushes
 //   the viewport down (scrollTop > 0). Repeat until no shift detected.
-async function scrollToLoadAllMessages(tabId) {
+// stopAtCount: 0 = 載入全部歷史（預設行為）
+//              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止，不再往前捲動
+//
+// 使用場景：對話已備份過（prevMsgCount > 0），只需捲回到上次備份的數量即可。
+// 新訊息在頁面載入時就已在 DOM 底部，捲回到 prevMsgCount 後 DOM 即包含完整內容。
+async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: async () => {
+    func: async (stopAtCount) => {
       // Expand any collapsed responses first
       document.querySelectorAll(
         'button[aria-label="Expand"], button[aria-label="展開"]'
@@ -97,12 +102,24 @@ async function scrollToLoadAllMessages(tabId) {
 
       const wait = ms => new Promise(r => setTimeout(r, ms));
 
+      function countTurns() {
+        return Math.max(
+          document.querySelectorAll('user-query').length,
+          document.querySelectorAll('model-response').length,
+          document.querySelectorAll('.query-content').length,
+          document.querySelectorAll('.response-content').length,
+        );
+      }
+
       // ── Strategy A: Voyager timeline dots ───────────────────────────────────
       const getFirstDot = () => document.querySelector('.timeline-dot[data-marker-index="0"]')
                               || document.querySelector('.timeline-dot');
 
       if (getFirstDot()) {
         for (let attempt = 0; attempt < 30; attempt++) {
+          // 已載入足夠數量，提前停止
+          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
+
           const dot = getFirstDot();
           if (!dot) break;
 
@@ -138,13 +155,10 @@ async function scrollToLoadAllMessages(tabId) {
         document.documentElement,
       ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
 
-      function countTurns() {
-        return Math.max(
-          document.querySelectorAll('user-query').length,
-          document.querySelectorAll('model-response').length,
-          document.querySelectorAll('.query-content').length,
-          document.querySelectorAll('.response-content').length,
-        );
+      // 已載入足夠數量，跳過捲動
+      if (stopAtCount > 0 && countTurns() >= stopAtCount) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+        return;
       }
 
       let prevTurnCount = countTurns();
@@ -165,6 +179,9 @@ async function scrollToLoadAllMessages(tabId) {
         }
 
         if (!newContentFound) break;
+
+        // 已載入足夠數量，提前停止往前捲動
+        if (stopAtCount > 0 && prevTurnCount >= stopAtCount) break;
       }
 
       // Restore to bottom
@@ -172,6 +189,7 @@ async function scrollToLoadAllMessages(tabId) {
       window.scrollTo(0, document.body.scrollHeight);
       await wait(500);
     },
+    args: [stopAtCount],
   });
 }
 
@@ -204,8 +222,18 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
 // ── Single-conversation backup ─────────────────────────────────────────────────
 
 async function backupSingleTab(tab, dirHandle) {
-  // Scroll to top first so lazy-loaded older messages are in the DOM
-  await scrollToLoadAllMessages(tab.id);
+  // 先取得上次備份的訊息數，再決定捲動深度。
+  // 若已備份過（prevMsgCount > 0），捲到 prevMsgCount 即可停止——
+  // 新訊息已在頁面底部，舊訊息捲回到 prevMsgCount 後 DOM 即包含完整內容。
+  const convId = stableConvId(tab.url);
+  const preStored = await chrome.storage.local.get([
+    `hash_${encodeURIComponent(tab.url)}`,
+    `chatFilename_${convId}`,
+    `chatMsgCount_${convId}`,
+  ]);
+  const prevMsgCount = preStored[`chatMsgCount_${convId}`] || 0;
+
+  await scrollToLoadAllMessages(tab.id, prevMsgCount);
 
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -218,12 +246,13 @@ async function backupSingleTab(tab, dirHandle) {
   }
 
   const { title, content, hash, url, messages } = data;
-  const convId = stableConvId(url);          // always a non-null stable string
+  const realConvId = stableConvId(url);
   const storageKey = `hash_${encodeURIComponent(url)}`;
-  const stored = await chrome.storage.local.get([
+  // 若 tab.url 和 content.js 拿到的 url 相同，直接複用 preStored；否則重新查詢
+  const stored = realConvId === convId ? preStored : await chrome.storage.local.get([
     storageKey,
-    `chatFilename_${convId}`,
-    `chatMsgCount_${convId}`,
+    `chatFilename_${realConvId}`,
+    `chatMsgCount_${realConvId}`,
   ]);
 
   if (stored[storageKey] === hash) {
@@ -232,9 +261,8 @@ async function backupSingleTab(tab, dirHandle) {
 
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
   // One stable file per conversation — never timestamped
-  const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
+  const filename = stored[`chatFilename_${realConvId}`] || `${safeTitle}_${realConvId}.md`;
 
-  const prevMsgCount = stored[`chatMsgCount_${convId}`] || 0;
   const currMsgCount = messages ? messages.length : 0;
   const now = new Date().toISOString();
 
@@ -254,9 +282,9 @@ async function backupSingleTab(tab, dirHandle) {
 
   await chrome.storage.local.set({
     [storageKey]: hash,
-    [`chatFilename_${convId}`]: filename,
-    [`chatMsgCount_${convId}`]: currMsgCount,
-    [`chatSyncTime_${convId}`]: now,
+    [`chatFilename_${realConvId}`]: filename,
+    [`chatMsgCount_${realConvId}`]: currMsgCount,
+    [`chatSyncTime_${realConvId}`]: now,
   });
 
   return { saved: true, filename };
@@ -524,7 +552,9 @@ async function performFullHistoryBackup(limitCount = 0) {
         }
 
         if (needFullScroll) {
-          await scrollToLoadAllMessages(tabId);
+          // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
+          // prevMsgCount = 0 表示從未備份，會退回為全量捲動
+          await scrollToLoadAllMessages(tabId, prevMsgCount);
         }
 
         const results = await chrome.scripting.executeScript({
