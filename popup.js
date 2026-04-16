@@ -134,24 +134,37 @@ function setSyncStatus(status, lastSyncTime) {
 
 function updateFullBackupUI(state) {
   const btn = document.getElementById('btn-full-backup');
+  const stopBtn = document.getElementById('btn-stop-backup');
   const progressDiv = document.getElementById('full-backup-progress');
   const progressText = document.getElementById('progress-text');
   const progressCurrent = document.getElementById('progress-current');
   const progressBar = document.getElementById('progress-bar');
 
-  if (!state || (!state.inProgress && !state.completedAt && !state.fatalError)) {
-    // Never run
+  // 回到「可開始」狀態：隱藏停止按鈕、恢復備份按鈕
+  function resetToIdle() {
     btn.disabled = false;
-    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
+    updateFullBackupBtnText();
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = false;
+    stopBtn.textContent = `⏹ ${i18nText('stopBackup')}`;
+  }
+
+  if (!state || (!state.inProgress && !state.completedAt && !state.fatalError && !state.stoppedByUser)) {
+    // Never run
+    resetToIdle();
     progressDiv.style.display = 'none';
     return;
   }
 
   if (state.fatalError) {
-    btn.disabled = false;
-    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
+    resetToIdle();
     progressDiv.style.display = 'block';
-    progressText.textContent = `${i18nText('error')}：${state.fatalError}`;
+    // 特殊錯誤碼對應 i18n 文字，其餘顯示原始訊息
+    const knownErrors = ['browserRestart', 'stuckReset'];
+    const errMsg = knownErrors.includes(state.fatalError)
+      ? i18nText(state.fatalError)
+      : `${i18nText('error')}：${state.fatalError}`;
+    progressText.textContent = errMsg;
     progressText.style.color = '#c5221f';
     progressCurrent.textContent = '';
     progressBar.style.width = '0%';
@@ -161,6 +174,7 @@ function updateFullBackupUI(state) {
   if (state.inProgress) {
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> ${i18nText('backingUp')}`;
+    stopBtn.style.display = '';
     progressDiv.style.display = 'block';
     progressText.style.color = '#5f6368';
 
@@ -170,7 +184,11 @@ function updateFullBackupUI(state) {
     } else {
       const pct = Math.round((state.done / state.total) * 100);
       const skippedNote = state.skipped > 0 ? `（${i18nText('skipped')}${state.skipped}${i18nText('dialogCount')}）` : '';
-      progressText.textContent = `${state.done} / ${state.total} ${i18nText('done')} ${skippedNote}`;
+      // 若有限制數量且偵測到 Pinned，顯示 Pinned 計數備註
+      const pinnedNote = (state.pinnedCount > 0 && state.selectedLimit > 0)
+        ? `，${i18nText('pinnedNote').replace('{n}', state.pinnedCount)}`
+        : '';
+      progressText.textContent = `${state.done} / ${state.total} ${i18nText('done')} ${skippedNote}${pinnedNote}`;
       progressBar.style.width = `${pct}%`;
     }
 
@@ -178,18 +196,40 @@ function updateFullBackupUI(state) {
     return;
   }
 
-  // Completed
-  btn.disabled = false;
-  btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
+  // 使用者手動停止
+  if (state.stoppedByUser) {
+    resetToIdle();
+    progressDiv.style.display = 'block';
+    progressText.style.color = '#5f6368';
+    progressText.textContent = `${i18nText('stoppedByUser')}（${i18nText('done')} ${state.done} ${i18nText('dialogCount')}）`;
+    progressCurrent.textContent = state.completedAt
+      ? `${i18nText('completedTime')}${formatBackupTime(state.completedAt)}`
+      : '';
+    progressBar.style.width = state.total > 0
+      ? `${Math.round((state.done / state.total) * 100)}%`
+      : '0%';
+    return;
+  }
+
+  // 正常完成
+  resetToIdle();
   progressDiv.style.display = 'block';
   progressText.style.color = '#188038';
 
+  // excluded = 超出 N 個 limit 的對話（全量備份時為 0）
+  const excludedNote = state.excluded > 0
+    ? `，${i18nText('excluded')} ${state.excluded} ${i18nText('excludedSuffix')}`
+    : '';
+
   if (state.total === 0 && state.skipped > 0) {
-    progressText.textContent = `${i18nText('allDone')} ${state.skipped} ${i18nText('dialogCount')} ${i18nText('noNeedBackup')}`;
+    progressText.textContent = `${i18nText('allDone')} ${state.skipped} ${i18nText('dialogCount')} ${i18nText('noNeedBackup')}${excludedNote}`;
   } else {
     const errNote = state.errors?.length ? `，${state.errors.length} ${i18nText('failures')}` : '';
     const skippedNote = state.skipped > 0 ? `，${i18nText('skipped')} ${state.skipped} ${i18nText('dialogCount')}` : '';
-    progressText.textContent = `${i18nText('completed')} ${state.done} ${i18nText('dialogCount')}${skippedNote}${errNote}`;
+    const pinnedNote = (state.pinnedCount > 0 && state.selectedLimit > 0)
+      ? `（${i18nText('pinnedNote').replace('{n}', state.pinnedCount)}）`
+      : '';
+    progressText.textContent = `${i18nText('completed')} ${state.done} ${i18nText('dialogCount')}${pinnedNote}${skippedNote}${excludedNote}${errNote}`;
   }
   progressCurrent.textContent = state.completedAt
     ? `${i18nText('completedTime')}${formatBackupTime(state.completedAt)}`
@@ -245,6 +285,14 @@ async function init() {
     select.value = String(backupInterval);
   }
 
+  // 還原全量備份範圍設定
+  const { fullBackupLimit } = await chrome.storage.local.get('fullBackupLimit');
+  const limitSelectEl = document.getElementById('full-backup-limit');
+  if (fullBackupLimit !== undefined) {
+    limitSelectEl.value = String(fullBackupLimit);
+  }
+  limitSelectEl.addEventListener('change', updateFullBackupBtnText);
+
   // 上次備份時間
   document.getElementById('last-backup-time').textContent =
     formatBackupTime(lastBackupTime);
@@ -271,8 +319,18 @@ async function init() {
     setFolderUI('尚未選擇資料夾', false);
   }
 
-  // 3. 全量備份進度
-  updateFullBackupUI(fullBackupState);
+  // 3. 全量備份進度（含 stale state 偵測）
+  // Service worker 被 Chrome 殺掉後 inProgress 會卡住；3 分鐘沒有心跳視為異常，自動重置。
+  let resolvedState = fullBackupState;
+  if (fullBackupState?.inProgress && fullBackupState?.lastUpdated) {
+    const ageMs = Date.now() - new Date(fullBackupState.lastUpdated).getTime();
+    if (ageMs > 3 * 60 * 1000) {
+      resolvedState = { ...fullBackupState, inProgress: false, fatalError: 'stuckReset' };
+      await chrome.storage.local.set({ fullBackupState: resolvedState });
+      await chrome.storage.local.remove('stopBackupRequested');
+    }
+  }
+  updateFullBackupUI(resolvedState);
 
   // 4. 當前對話同步狀態
   await refreshCurrentChatStatus();
@@ -351,6 +409,18 @@ async function selectLanguage(lang) {
   document.getElementById('lang-dropdown').classList.remove('show');
 }
 
+// 根據目前選取的備份範圍，更新「同步」按鈕文字
+function updateFullBackupBtnText() {
+  const btn = document.getElementById('btn-full-backup');
+  if (btn.disabled) return; // 備份進行中，不覆蓋 loading 文字
+  const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
+  if (limitCount === 0) {
+    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
+  } else {
+    btn.innerHTML = `🔄 ${i18nText('syncLatestPrefix')} ${limitCount} ${i18nText('dialogCount')}`;
+  }
+}
+
 // 更新所有 UI 文本
 function updateUIText() {
   // Header & labels
@@ -379,7 +449,23 @@ function updateUIText() {
   // Buttons
   document.getElementById('btn-backup').textContent = `▶ ${i18nText('backupNow')}`;
   document.querySelectorAll('.card-label')[3].textContent = i18nText('fullBackup');
-  document.getElementById('btn-full-backup').textContent = `🔄 ${i18nText('syncAll')}`;
+
+  // Full backup limit select
+  document.querySelector('label[for="full-backup-limit"]').textContent = i18nText('backupLimit');
+  const limitSelect = document.getElementById('full-backup-limit');
+  limitSelect.querySelector('option[value="0"]').textContent = i18nText('limitAll');
+  limitSelect.querySelector('option[value="5"]').textContent = i18nText('limitTop5');
+  limitSelect.querySelector('option[value="10"]').textContent = i18nText('limitTop10');
+  limitSelect.querySelector('option[value="20"]').textContent = i18nText('limitTop20');
+  limitSelect.querySelector('option[value="30"]').textContent = i18nText('limitTop30');
+
+  updateFullBackupBtnText();
+
+  // Stop button (only update text if not currently stopping)
+  const stopBtn = document.getElementById('btn-stop-backup');
+  if (!stopBtn.disabled) {
+    stopBtn.textContent = `⏹ ${i18nText('stopBackup')}`;
+  }
 
   // Last backup
   document.querySelector('.last-backup').innerHTML =
@@ -506,7 +592,29 @@ document.getElementById('btn-full-backup').addEventListener('click', async () =>
   showStatus('已開始同步所有歷史，請勿關閉 Gemini 分頁', 'info');
   setTimeout(clearStatus, 4000);
 
-  await chrome.runtime.sendMessage({ action: 'startFullBackup' });
+  const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
+  await chrome.storage.local.set({ fullBackupLimit: limitCount });
+  await chrome.runtime.sendMessage({ action: 'startFullBackup', limitCount });
+});
+
+// ── Event: 停止全量備份 ────────────────────────────────────────────────────────
+
+document.getElementById('btn-stop-backup').addEventListener('click', async () => {
+  const stopBtn = document.getElementById('btn-stop-backup');
+  stopBtn.disabled = true;
+  stopBtn.textContent = i18nText('stopping');
+  try {
+    await chrome.runtime.sendMessage({ action: 'stopFullBackup' });
+  } catch (_) {
+    // Service worker 可能已不在執行；直接強制重置 storage
+    const { fullBackupState } = await chrome.storage.local.get('fullBackupState');
+    if (fullBackupState?.inProgress) {
+      const resetState = { ...fullBackupState, inProgress: false, fatalError: 'stuckReset' };
+      await chrome.storage.local.set({ fullBackupState: resetState });
+      await chrome.storage.local.remove('stopBackupRequested');
+      updateFullBackupUI(resetState);
+    }
+  }
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────
