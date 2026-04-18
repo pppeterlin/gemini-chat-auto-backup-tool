@@ -448,26 +448,27 @@ function updateFullBackupBtnText() {
   if (btn.disabled) return; // 備份進行中，不覆蓋 loading 文字
   const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
   if (limitCount === 0) {
-    btn.innerHTML = `🔄 ${i18nText('syncAll')}`;
+    btn.textContent = i18nText('syncAll');
   } else {
-    btn.innerHTML = `🔄 ${i18nText('syncLatestPrefix')} ${limitCount} ${i18nText('dialogCount')}`;
+    btn.textContent = `${i18nText('syncLatestPrefix')} ${limitCount} ${i18nText('dialogCount')}`;
   }
 }
 
 // 更新所有 UI 文本
 function updateUIText() {
-  // Header & labels
-  document.querySelector('.header h1').textContent = i18nText('appName');
-  document.querySelector('.header p').textContent = i18nText('appDesc');
+  // Header
+  const h1 = document.querySelector('.header h1');
+  const desc = document.querySelector('.header p');
+  if (h1) h1.textContent = i18nText('appName');
+  if (desc) desc.textContent = i18nText('appDesc');
 
   // Folder card
-  document.querySelectorAll('.card-label')[0].textContent = i18nText('backupFolder');
-  document.getElementById('btn-select-folder').textContent = `📁 ${i18nText('selectFolder')}`;
-  document.getElementById('btn-reauth').textContent = `🔐 ${i18nText('reauth')}`;
+  document.getElementById('btn-select-folder').textContent = i18nText('selectFolder');
+  document.getElementById('btn-reauth').textContent = i18nText('reauth');
 
-  // Backup frequency card
-  document.querySelectorAll('.card-label')[1].textContent = i18nText('backupFreq');
-  document.querySelector('.select-row label').textContent = i18nText('autoBackup');
+  // Auto-backup row label
+  const intervalLabel = document.querySelector('label[for="interval-select"]');
+  if (intervalLabel) intervalLabel.textContent = i18nText('autoBackup');
 
   const select = document.getElementById('interval-select');
   select.querySelector('option[value="0"]').textContent = i18nText('off');
@@ -476,15 +477,20 @@ function updateUIText() {
   select.querySelector('option[value="8"]').textContent = i18nText('every8h');
   select.querySelector('option[value="24"]').textContent = i18nText('every24h');
 
-  // Current chat status
-  document.querySelectorAll('.card-label')[2].textContent = i18nText('currentStatus');
+  // Section card titles
+  const titleCurrent = document.getElementById('title-current-chat');
+  if (titleCurrent) titleCurrent.textContent = i18nText('currentStatus');
+  const titleSettings = document.getElementById('title-settings');
+  if (titleSettings) titleSettings.textContent = i18nText('backupFreq');
+  const titleHistory = document.getElementById('title-history');
+  if (titleHistory) titleHistory.textContent = i18nText('fullBackup');
 
-  // Buttons
-  document.getElementById('btn-backup').textContent = `▶ ${i18nText('backupNow')}`;
-  document.querySelectorAll('.card-label')[3].textContent = i18nText('fullBackup');
+  // Main CTA
+  document.getElementById('btn-backup').textContent = i18nText('backupNow');
 
   // Full backup limit select
-  document.querySelector('label[for="full-backup-limit"]').textContent = i18nText('backupLimit');
+  const limitLabel = document.querySelector('label[for="full-backup-limit"]');
+  if (limitLabel) limitLabel.textContent = i18nText('backupLimit');
   const limitSelect = document.getElementById('full-backup-limit');
   limitSelect.querySelector('option[value="0"]').textContent = i18nText('limitAll');
   limitSelect.querySelector('option[value="5"]').textContent = i18nText('limitTop5');
@@ -497,15 +503,18 @@ function updateUIText() {
   // Stop button (only update text if not currently stopping)
   const stopBtn = document.getElementById('btn-stop-backup');
   if (!stopBtn.disabled) {
-    stopBtn.textContent = `⏹ ${i18nText('stopBackup')}`;
+    stopBtn.textContent = i18nText('stopBackup');
   }
 
   // Retry button
-  document.getElementById('btn-retry-failed').textContent = `↻ ${i18nText('retryFailed')}`;
+  document.getElementById('btn-retry-failed').textContent = i18nText('retryFailed');
 
-  // Last backup
-  document.querySelector('.last-backup').innerHTML =
-    `<span>⏰ ${i18nText('lastBackupTime')}</span><span id="last-backup-time">—</span>`;
+  // Last backup row
+  const lastBackupRow = document.querySelector('.last-backup-row');
+  if (lastBackupRow) {
+    lastBackupRow.innerHTML =
+      `<span>${i18nText('lastBackupTime')}</span><span id="last-backup-time">—</span>`;
+  }
 }
 
 // ── Event: 選擇資料夾 ──────────────────────────────────────────────────────────
