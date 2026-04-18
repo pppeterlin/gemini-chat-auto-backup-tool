@@ -410,7 +410,7 @@ async function performFullHistoryBackup(limitCount = 0) {
     currentUrl: '',
     startedAt: new Date().toISOString(),
     lastUpdated: new Date().toISOString(),
-    errors: [],
+    conversations: [], // 所有候選對話及其狀態 {url, title, status, reason}
     fatalError: null,
     stoppedByUser: false,
   };
@@ -493,6 +493,10 @@ async function performFullHistoryBackup(limitCount = 0) {
     // 真正的「跳過」判斷在導航後拿到 content.js 結果再比對。
     state.total = candidateConvs.length;
     state.skipped = 0;
+    // 從一開始就建立完整清單，status=pending；手動停止時未處理的也看得到
+    state.conversations = candidateConvs.map(c => ({
+      url: c.url, title: c.title, status: 'pending', reason: null,
+    }));
     await saveState();
 
     // ── 手動停止 helper ───────────────────────────────────────────────────────────
@@ -516,6 +520,8 @@ async function performFullHistoryBackup(limitCount = 0) {
       state.currentTitle = conv.title;
       state.currentUrl = conv.url;
       await saveState();
+
+      const convEntry = state.conversations.find(c => c.url === conv.url);
 
       try {
         const convId = stableConvId(conv.url);
@@ -579,13 +585,14 @@ async function performFullHistoryBackup(limitCount = 0) {
 
         const data = results?.[0]?.result;
         if (!data?.content) {
-          state.errors.push({ url: conv.url, title: conv.title, reason: '無法擷取內容' });
+          if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
           const { content, hash, url, messages } = data;
           const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
 
           // hash 一致 → 內容確認沒有變化，跳過
           if (stored[storageKey] === hash) {
+            if (convEntry) convEntry.status = 'skipped';
             state.skipped++;
             state.done++;
             await saveState();
@@ -595,6 +602,7 @@ async function performFullHistoryBackup(limitCount = 0) {
           // msg count 回退保護（scroll 未完整載入）
           const currMsgCount = messages ? messages.length : 0;
           if (prevMsgCount > 0 && currMsgCount < prevMsgCount) {
+            if (convEntry) convEntry.status = 'skipped';
             state.skipped++;
             state.done++;
             await saveState();
@@ -611,6 +619,8 @@ async function performFullHistoryBackup(limitCount = 0) {
           await writable.write(content);
           await writable.close();
 
+          if (convEntry) convEntry.status = 'done';
+
           const now = new Date().toISOString();
           await chrome.storage.local.set({
             [realStorageKey]: hash,
@@ -620,7 +630,7 @@ async function performFullHistoryBackup(limitCount = 0) {
           });
         }
       } catch (err) {
-        state.errors.push({ url: conv.url, title: conv.title, reason: err.message });
+        if (convEntry) { convEntry.status = 'failed'; convEntry.reason = err.message; }
         console.error('[FullBackup] Conversation error:', err);
       }
 
@@ -651,16 +661,26 @@ async function performRetryFailedBackup() {
   const { fullBackupState: currentState } = await chrome.storage.local.get('fullBackupState');
   if (currentState?.inProgress) return;
 
-  const failedConvs = (currentState?.errors || []).filter(e => e.url);
-  if (!failedConvs.length) return;
+  // 重試目標：failed（失敗）或 pending（手動停止前未處理）
+  const retryTargets = (currentState?.conversations || []).filter(
+    c => c.status === 'failed' || c.status === 'pending'
+  );
+  if (!retryTargets.length) return;
+
+  // 將重試目標 status 全部重設為 pending，保留其餘已完成的紀錄
+  const resetConversations = (currentState.conversations || []).map(c =>
+    (c.status === 'failed' || c.status === 'pending')
+      ? { ...c, status: 'pending', reason: null }
+      : c
+  );
 
   const state = {
     ...currentState,
     inProgress: true,
-    total: failedConvs.length,
+    total: retryTargets.length,
     done: 0,
     skipped: 0,
-    errors: [],
+    conversations: resetConversations,
     currentTitle: '',
     currentUrl: '',
     startedAt: new Date().toISOString(),
@@ -706,7 +726,7 @@ async function performRetryFailedBackup() {
     const tabId = tab.id;
     const originalUrl = tab.url;
 
-    for (const conv of failedConvs) {
+    for (const target of retryTargets) {
       { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
         if (s) {
           await chrome.storage.local.remove('stopBackupRequested');
@@ -721,21 +741,23 @@ async function performRetryFailedBackup() {
         }
       }
 
-      state.currentTitle = conv.title;
-      state.currentUrl = conv.url;
+      state.currentTitle = target.title;
+      state.currentUrl = target.url;
       await saveState();
 
+      const convEntry = state.conversations.find(c => c.url === target.url);
+
       try {
-        const convId = stableConvId(conv.url);
-        const storageKey = `hash_${encodeURIComponent(conv.url)}`;
+        const convId = stableConvId(target.url);
+        const storageKey = `hash_${encodeURIComponent(target.url)}`;
         const stored = await chrome.storage.local.get([
           storageKey,
           `chatFilename_${convId}`,
           `chatMsgCount_${convId}`,
         ]);
 
-        const isGemChat = conv.url.includes('/gem/');
-        await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
+        const isGemChat = target.url.includes('/gem/');
+        await navigateAndWait(tabId, target.url, isGemChat ? 4000 : 2500);
 
         // 重試時不信任舊的 msgCount，做完整 scroll
         await scrollToLoadAllMessages(tabId, 0);
@@ -747,12 +769,12 @@ async function performRetryFailedBackup() {
 
         const data = results?.[0]?.result;
         if (!data?.content) {
-          state.errors.push({ url: conv.url, title: conv.title, reason: '無法擷取內容' });
+          if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
           const { content, hash, url, messages } = data;
-          const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
+          const realStorageKey = `hash_${encodeURIComponent(url || target.url)}`;
 
-          const filenameTitle = conv.title || data.title || '未命名對話';
+          const filenameTitle = target.title || data.title || '未命名對話';
           const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
           const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
 
@@ -760,6 +782,8 @@ async function performRetryFailedBackup() {
           const writable = await fileHandle.createWritable();
           await writable.write(content);
           await writable.close();
+
+          if (convEntry) convEntry.status = 'done';
 
           const currMsgCount = messages ? messages.length : 0;
           const now = new Date().toISOString();
@@ -771,7 +795,7 @@ async function performRetryFailedBackup() {
           });
         }
       } catch (err) {
-        state.errors.push({ url: conv.url, title: conv.title, reason: err.message });
+        if (convEntry) { convEntry.status = 'failed'; convEntry.reason = err.message; }
         console.error('[RetryBackup] Conversation error:', err);
       }
 
