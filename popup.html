@@ -7,20 +7,44 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    body {
-      font-family: 'Segoe UI', 'PingFang TC', 'Noto Sans TC', sans-serif;
-      font-size: 13px;
-      color: #202124;
-      background: #fff;
-      width: 320px;
-      padding: 0;
+    :root {
+      --bg:         #FAFAF7;
+      --card:       #FFFFFF;
+      --border:     #EAEAE4;
+      --border-strong: #D9D9D1;
+      --ink:        #1A1A1A;
+      --ink-muted:  #6B6B66;
+      --ink-faint:  #9A9A94;
+
+      --coral:      #F07A5C;
+      --coral-hover:#E26446;
+      --coral-tint: #FCE8E1;
+
+      --success:    #3F7A52;
+      --success-bg: #E8F0E9;
+      --warning:    #A87324;
+      --warning-bg: #F6EEDC;
+      --danger:     #B8453F;
+      --danger-bg:  #F6E1E1;
+      --info:       #4A6F8E;
+      --info-bg:    #E4ECF3;
     }
 
-    /* Header */
+    body {
+      font-family: 'Inter', 'Segoe UI', 'PingFang TC', 'Noto Sans TC', sans-serif;
+      font-size: 13px;
+      color: var(--ink);
+      background: var(--bg);
+      width: 320px;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ── */
     .header {
-      background: linear-gradient(135deg, #D97757, #B85C3A);
-      color: #fff;
-      padding: 12px 16px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 16px;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -28,185 +52,220 @@
     .header-icon {
       width: 32px;
       height: 32px;
-      border-radius: 6px;
-      overflow: hidden;
       flex-shrink: 0;
       display: flex;
       align-items: center;
       justify-content: center;
     }
-    .header-icon img {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-    }
-    .header h1 {
-      font-size: 15px;
+    .header-icon svg { width: 100%; height: 100%; }
+    .header-title h1 {
+      font-size: 14px;
       font-weight: 600;
-      letter-spacing: 0.2px;
+      letter-spacing: -0.1px;
+      color: var(--ink);
     }
-    .header p {
+    .header-title p {
       font-size: 11px;
-      opacity: 0.8;
-      margin-top: 2px;
+      color: var(--ink-muted);
+      margin-top: 1px;
     }
 
-    /* Body */
-    .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+    /* ── Body ── */
+    .body {
+      padding: 14px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
 
-    /* Card */
+    /* ── Card title ── */
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 12px;
+    }
+
+    /* ── Cards ── */
     .card {
-      background: #f8f9fa;
-      border: 1px solid #e0e0e0;
-      border-radius: 8px;
-      padding: 12px 14px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
     }
-    .card-label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: #5f6368;
-      margin-bottom: 8px;
+    .folder-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
     }
-
-    /* Folder status */
     .folder-status {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 6px 10px;
-      background: #fff;
-      border: 1px solid #e0e0e0;
-      border-radius: 6px;
-      min-height: 34px;
+      min-height: 22px;
     }
-    .folder-icon { font-size: 16px; flex-shrink: 0; }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .status-dot.bound { background: var(--success); }
+    .folder-status:has(#folder-name.bound) .status-dot { background: var(--success); }
     #folder-name {
       flex: 1;
-      font-size: 12px;
-      color: #5f6368;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    #folder-name.bound { color: #188038; font-weight: 500; }
+    #folder-name.bound { color: var(--ink); }
+    /* Badge kept for i18n text, but hidden visually — status-dot replaces it */
     .folder-badge {
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 10px;
-      background: #e8f5e9;
-      color: #188038;
+      display: none;
+    }
+    .folder-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    /* ── Rows (flat, no card) ── */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 28px;
+    }
+    .row-label {
+      font-size: 12px;
+      color: var(--ink-muted);
       flex-shrink: 0;
     }
-    .folder-badge.unset { background: #fce8e6; color: #c5221f; }
+    .row-value {
+      font-size: 12px;
+      color: var(--ink);
+      font-weight: 500;
+    }
 
-    /* Buttons */
+    /* ── Buttons ── */
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      padding: 8px 14px;
-      border: none;
+      padding: 9px 14px;
+      border: 1px solid transparent;
       border-radius: 6px;
       font-size: 13px;
       font-weight: 500;
+      font-family: inherit;
       cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
       width: 100%;
+      white-space: nowrap;
     }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary {
-      background: #D97757;
-      color: #fff;
-    }
-    .btn-primary:hover:not(:disabled) { background: #B85C3A; }
-    .btn-secondary {
-      background: #fff;
-      color: #D97757;
-      border: 1px solid #dadce0;
-    }
-    .btn-secondary:hover:not(:disabled) { background: #f1f3f4; }
-    .btn-success {
-      background: #188038;
-      color: #fff;
-    }
-    .btn-success:hover:not(:disabled) { background: #0d652d; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-    /* Select */
-    .select-row {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-      width: 100%;
+    /* Primary = the ONE coral CTA */
+    .btn-primary {
+      background: var(--coral);
+      color: #fff;
+      border-color: var(--coral);
     }
-    .select-row label {
-      font-size: 12px;
-      color: #5f6368;
-      flex-shrink: 0;
+    .btn-primary:hover:not(:disabled) {
+      background: var(--coral-hover);
+      border-color: var(--coral-hover);
     }
+
+    /* Outline = secondary weight */
+    .btn-outline {
+      background: var(--card);
+      color: var(--ink);
+      border: 1px solid var(--border-strong);
+    }
+    .btn-outline:hover:not(:disabled) {
+      background: var(--bg);
+      border-color: var(--ink-muted);
+    }
+
+    /* Ghost = tertiary, lowest weight */
+    .btn-ghost {
+      background: transparent;
+      color: var(--ink-muted);
+      border: 1px solid transparent;
+    }
+    .btn-ghost:hover:not(:disabled) {
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    /* Success (retained for "立即備份" when it's the active state — merged into primary now) */
+    .btn-success {
+      background: var(--success);
+      color: #fff;
+      border-color: var(--success);
+    }
+    .btn-success:hover:not(:disabled) {
+      background: #2F5F3F;
+      border-color: #2F5F3F;
+    }
+
+    /* ── Select ── */
     select {
-      flex: 1;
-      min-width: 100px;
-      padding: 8px 10px;
-      border: 1px solid #dadce0;
+      padding: 7px 10px;
+      border: 1px solid var(--border-strong);
       border-radius: 6px;
       font-size: 12px;
-      color: #202124;
-      background: #fff;
+      font-family: inherit;
+      color: var(--ink);
+      background: var(--card);
       cursor: pointer;
       outline: none;
+      min-width: 130px;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
+    select:hover { border-color: var(--ink-muted); }
     select:focus {
-      border-color: #D97757;
-      box-shadow: 0 0 0 2px rgba(217,119,87,0.2);
+      border-color: var(--coral);
+      box-shadow: 0 0 0 3px var(--coral-tint);
     }
 
-    /* Last backup */
-    .last-backup {
+    /* ── Last backup (inline row) ── */
+    .last-backup-row {
       display: flex;
       align-items: center;
-      gap: 6px;
+      justify-content: space-between;
       font-size: 12px;
-      color: #5f6368;
+      color: var(--ink-muted);
     }
-    #last-backup-time { color: #188038; font-weight: 500; }
+    #last-backup-time { color: var(--ink); font-weight: 500; }
 
-    /* Status message */
+    /* ── Status message ── */
     #status-msg {
       font-size: 12px;
-      padding: 8px 12px;
+      padding: 9px 12px;
       border-radius: 6px;
       display: none;
       line-height: 1.5;
+      border: 1px solid transparent;
     }
-    #status-msg.success {
-      display: block;
-      background: #e8f5e9;
-      color: #188038;
-      border: 1px solid #a8d5b5;
-    }
-    #status-msg.error {
-      display: block;
-      background: #fce8e6;
-      color: #c5221f;
-      border: 1px solid #f5b8b4;
-    }
-    #status-msg.info {
-      display: block;
-      background: #e8f0fe;
-      color: #B85C3A;
-      border: 1px solid #adc4f0;
-    }
+    #status-msg.success { display: block; background: var(--success-bg); color: var(--success); border-color: #C6DBCC; }
+    #status-msg.error   { display: block; background: var(--danger-bg);  color: var(--danger);  border-color: #E8C2C0; }
+    #status-msg.info    { display: block; background: var(--info-bg);    color: var(--info);    border-color: #C8D6E2; }
 
-    /* Loading spinner */
+    /* ── Spinner ── */
     .spinner {
       display: inline-block;
       width: 14px;
       height: 14px;
-      border: 2px solid rgba(255,255,255,0.5);
+      border: 2px solid rgba(255,255,255,0.4);
       border-top-color: #fff;
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
@@ -214,7 +273,7 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── 當前對話同步狀態 ── */
+    /* ── Current chat sync ── */
     .sync-status-row {
       display: flex;
       align-items: center;
@@ -225,132 +284,125 @@
       font-size: 11px;
       font-weight: 600;
       padding: 3px 9px;
-      border-radius: 10px;
+      border-radius: 999px;
       white-space: nowrap;
+      border: 1px solid transparent;
     }
-    .sync-badge.never  { background: #fce8e6; color: #c5221f; }
-    .sync-badge.syncing { background: #e8f0fe; color: #B85C3A; }
-    .sync-badge.synced { background: #e8f5e9; color: #188038; }
-    .sync-badge.has-new { background: #fef7e0; color: #b06000; border: 1px solid #f9ab00; }
-    #sync-status-time {
-      font-size: 11px;
-      color: #5f6368;
-    }
+    .sync-badge.never   { background: var(--danger-bg);  color: var(--danger);  border-color: #E8C2C0; }
+    .sync-badge.syncing { background: var(--info-bg);    color: var(--info);    border-color: #C8D6E2; }
+    .sync-badge.synced  { background: var(--success-bg); color: var(--success); border-color: #C6DBCC; }
+    .sync-badge.has-new { background: var(--warning-bg); color: var(--warning); border-color: #E6D4A8; }
+    #sync-status-time { font-size: 11px; color: var(--ink-muted); }
 
-    /* ── 全量備份進度 ── */
+    /* ── Full backup progress ── */
     #full-backup-progress { margin-top: 10px; }
     .progress-text {
       font-size: 12px;
-      color: #5f6368;
-      margin-bottom: 5px;
-      line-height: 1.4;
+      color: var(--ink);
+      font-weight: 500;
+      margin-bottom: 4px;
     }
     .progress-current {
       font-size: 11px;
-      color: #9aa0a6;
-      margin-bottom: 5px;
+      color: var(--ink-faint);
+      margin-bottom: 6px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .progress-bar-wrap {
       height: 4px;
-      background: #e0e0e0;
-      border-radius: 2px;
+      background: var(--border);
+      border-radius: 999px;
       overflow: hidden;
     }
     .progress-bar {
       height: 100%;
-      background: #D97757;
-      border-radius: 2px;
+      background: var(--coral);
+      border-radius: 999px;
       transition: width 0.4s ease;
       width: 0%;
     }
-    #failed-list {
-      font-size: 11px;
-      color: #5f6368;
-    }
+    #failed-list { font-size: 11px; color: var(--ink-muted); }
     #failed-list summary {
       cursor: pointer;
-      color: #c5221f;
+      color: var(--danger);
       font-weight: 500;
       user-select: none;
       padding: 2px 0;
     }
-    #failed-list ul {
-      margin: 4px 0 0 0;
-      padding-left: 14px;
+    #failed-list ul { margin: 4px 0 0 0; padding-left: 14px; }
+    #failed-list li { margin-bottom: 3px; line-height: 1.4; word-break: break-word; }
+    #failed-list .fail-reason { color: var(--ink-faint); }
+
+    /* ── History section ── */
+    .history-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
-    #failed-list li {
-      margin-bottom: 3px;
-      line-height: 1.4;
-      word-break: break-word;
-    }
-    #failed-list .fail-reason {
-      color: #9aa0a6;
+    .history-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
     }
 
-    /* Language Selector */
+    /* ── Language selector ── */
     .lang-selector {
       position: relative;
       display: inline-block;
-    }
-    .header .lang-selector {
       margin-left: auto;
     }
     .lang-btn {
-      background: none;
-      border: 1.5px solid rgba(255,255,255,0.4);
-      border-radius: 4px;
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
       cursor: pointer;
-      font-size: 16px;
-      padding: 6px 8px;
+      padding: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #fff;
+      color: var(--ink-muted);
       transition: all 0.15s;
-      width: 32px;
-      height: 32px;
+      width: 30px;
+      height: 30px;
     }
-    .header .lang-btn:hover {
-      border-color: #fff;
-      background: rgba(255,255,255,0.1);
+    .lang-btn:hover {
+      border-color: var(--ink-muted);
+      color: var(--ink);
+      background: var(--bg);
     }
     .lang-dropdown {
       position: absolute;
       top: 100%;
-      right: -4px;
-      background: #fff;
-      border: 1px solid #dadce0;
+      right: 0;
+      background: var(--card);
+      border: 1px solid var(--border);
       border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
       max-height: 340px;
       overflow-y: auto;
       z-index: 1000;
-      min-width: 160px;
+      min-width: 170px;
       display: none;
       margin-top: 6px;
     }
-    .lang-dropdown.show {
-      display: block;
-    }
+    .lang-dropdown.show { display: block; }
     .lang-option {
-      padding: 10px 14px;
+      padding: 9px 14px;
       font-size: 12px;
-      color: #202124;
+      color: var(--ink);
       cursor: pointer;
       transition: background 0.1s;
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .lang-option:hover {
-      background: #f1f3f4;
-    }
+    .lang-option:hover { background: var(--bg); }
     .lang-option.active {
-      background: #e8f0fe;
-      color: #D97757;
+      background: var(--coral-tint);
+      color: var(--coral-hover);
       font-weight: 500;
     }
     .lang-option::before {
@@ -360,42 +412,60 @@
       border-radius: 50%;
       background: transparent;
     }
-    .lang-option.active::before {
-      background: #D97757;
+    .lang-option.active::before { background: var(--coral); }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--ink-faint);
+      text-align: center;
+      letter-spacing: 0.3px;
     }
 
-    /* Footer */
-    .footer {
-      padding: 8px 12px;
-      border-top: 1px solid #e0e0e0;
-      font-size: 11px;
-      color: #9aa0a6;
-      text-align: center;
-      display: flex;
+    /* ── Icon-only mini buttons inside rows ── */
+    .btn-icon {
+      display: inline-flex;
       align-items: center;
-      justify-content: space-between;
-      min-height: 32px;
+      justify-content: center;
+      gap: 4px;
     }
-    .footer span {
-      flex: 1;
-    }
+    .btn-icon svg { width: 14px; height: 14px; }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="header-icon"><img src="icon.png" alt="icon" /></div>
-    <div style="flex: 1;">
+    <div class="header-icon">
+      <!-- Brow-cat mark -->
+      <svg viewBox="0 0 64 64" fill="none" stroke="#F07A5C" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M 12 30 C 12 22, 14 18, 18 18 L 21 8 L 28 18 C 30 17, 34 17, 36 18 L 43 8 L 46 18 C 50 18, 52 22, 52 30 L 52 42 C 52 52, 44 56, 32 56 C 20 56, 12 52, 12 42 Z" />
+        <path d="M20 14 L22 18 L18 18 Z" fill="#F07A5C" stroke="none" />
+        <path d="M44 14 L46 18 L42 18 Z" fill="#F07A5C" stroke="none" />
+        <circle cx="27" cy="26" r="2.6" fill="#F07A5C" stroke="none" />
+        <circle cx="37" cy="26" r="2.6" fill="#F07A5C" stroke="none" />
+        <circle cx="26" cy="32" r="1.6" fill="#1A1A1A" stroke="none" />
+        <circle cx="38" cy="32" r="1.6" fill="#1A1A1A" stroke="none" />
+        <path d="M30 40 L34 40 L32 43 Z" fill="#F07A5C" stroke="#F07A5C" stroke-width="1.2" />
+        <path d="M32 43 Q29 46 27 45" />
+        <path d="M32 43 Q35 46 37 45" />
+        <path d="M8 42 L20 41" />
+        <path d="M8 47 L20 45" />
+        <path d="M56 42 L44 41" />
+        <path d="M56 47 L44 45" />
+      </svg>
+    </div>
+    <div class="header-title" style="flex: 1;">
       <h1>Gemini Chat Backup</h1>
       <p>自動備份對話到本地 Markdown</p>
     </div>
-    <div class="lang-selector" style="margin-left: auto;">
+    <div class="lang-selector">
       <button class="lang-btn" id="lang-toggle" title="Switch language">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"></circle>
-          <path d="M12 2a8 8 0 0 1 0 16"></path>
           <path d="M2 12h20"></path>
-          <path d="M12 2a4.5 4.5 0 0 0 0 9"></path>
-          <path d="M12 13a4.5 4.5 0 0 0 0 9"></path>
+          <path d="M12 2a14 14 0 0 1 0 20"></path>
+          <path d="M12 2a14 14 0 0 0 0 20"></path>
         </svg>
       </button>
       <div class="lang-dropdown" id="lang-dropdown"></div>
@@ -405,28 +475,41 @@
   <div class="body">
 
     <!-- 資料夾設定 -->
-    <div class="card">
-      <div class="card-label">備份資料夾</div>
+    <div class="folder-card">
       <div class="folder-status">
-        <span class="folder-icon">&#128193;</span>
+        <span class="status-dot" id="folder-dot"></span>
         <span id="folder-name">尚未選擇資料夾</span>
         <span id="folder-badge" class="folder-badge unset">未設定</span>
       </div>
-      <div style="display:flex;gap:8px;margin-top:10px;">
-        <button id="btn-select-folder" class="btn btn-secondary" style="flex:1;">
-          &#128194; 選擇資料夾
+      <div class="folder-actions">
+        <button id="btn-select-folder" class="btn btn-outline" style="flex:1;">
+          選擇資料夾
         </button>
-        <button id="btn-reauth" class="btn btn-secondary" style="flex:1;display:none;">
-          &#128274; 重新授權
+        <button id="btn-reauth" class="btn btn-outline" style="flex:1;display:none;">
+          重新授權
         </button>
       </div>
     </div>
 
-    <!-- 備份頻率 -->
+    <!-- 立即備份 — 唯一的珊瑚色 CTA -->
+    <button id="btn-backup" class="btn btn-primary">
+      立即備份
+    </button>
+
+    <!-- 當前對話同步狀態 -->
+    <div class="card" id="current-chat-card" style="display:none;">
+      <div class="card-title" id="title-current-chat">當前對話狀態</div>
+      <div class="sync-status-row">
+        <span id="sync-status-badge" class="sync-badge never">未同步</span>
+        <span id="sync-status-time"></span>
+      </div>
+    </div>
+
+    <!-- 設定 -->
     <div class="card">
-      <div class="card-label">備份頻率</div>
-      <div class="select-row">
-        <label for="interval-select">自動備份：</label>
+      <div class="card-title" id="title-settings">設定</div>
+      <div class="row">
+        <label class="row-label" for="interval-select">自動備份</label>
         <select id="interval-select">
           <option value="0">關閉</option>
           <option value="1">每 1 小時</option>
@@ -435,58 +518,44 @@
           <option value="24">每天（24 小時）</option>
         </select>
       </div>
-    </div>
-
-    <!-- 當前對話同步狀態 -->
-    <div class="card" id="current-chat-card" style="display:none;">
-      <div class="card-label">當前對話狀態</div>
-      <div class="sync-status-row">
-        <span id="sync-status-badge" class="sync-badge never">未同步</span>
-        <span id="sync-status-time"></span>
+      <div class="last-backup-row" style="margin-top: 10px;">
+        <span>上次備份</span>
+        <span id="last-backup-time">—</span>
       </div>
     </div>
 
-    <!-- 立即備份 -->
-    <button id="btn-backup" class="btn btn-success">
-      &#9654; 立即備份
-    </button>
-
-    <!-- 同步所有歷史 -->
+    <!-- 歷史備份 -->
     <div class="card">
-      <div class="card-label">歷史備份</div>
-      <div class="select-row" style="margin-bottom: 8px;">
-        <label for="full-backup-limit">備份範圍：</label>
-        <select id="full-backup-limit">
-          <option value="0">全部</option>
-          <option value="5">前 5 個</option>
-          <option value="10">前 10 個</option>
-          <option value="20">前 20 個</option>
-          <option value="30">前 30 個</option>
-        </select>
-      </div>
-      <button id="btn-full-backup" class="btn btn-primary">
-        &#128260; 同步所有歷史
-      </button>
-      <button id="btn-stop-backup" class="btn btn-secondary" style="display:none; margin-top: 6px;">
-        &#9209; 停止備份
-      </button>
-      <button id="btn-retry-failed" class="btn btn-secondary" style="display:none; margin-top: 6px;">
-        &#8635; 重試失敗項目
-      </button>
-      <div id="full-backup-progress" style="display:none;">
-        <div class="progress-text" id="progress-text">準備中…</div>
-        <div class="progress-current" id="progress-current"></div>
-        <div class="progress-bar-wrap">
-          <div class="progress-bar" id="progress-bar"></div>
+      <div class="card-title" id="title-history">歷史備份</div>
+      <div class="history-controls">
+        <div class="history-row">
+          <label class="row-label" for="full-backup-limit">備份範圍</label>
+          <select id="full-backup-limit">
+            <option value="0">全部</option>
+            <option value="5">前 5 個</option>
+            <option value="10">前 10 個</option>
+            <option value="20">前 20 個</option>
+            <option value="30">前 30 個</option>
+          </select>
         </div>
-        <div id="failed-list" style="display:none; margin-top:8px;"></div>
+        <button id="btn-full-backup" class="btn btn-outline" style="margin-top: 8px;">
+          同步所有歷史
+        </button>
+        <button id="btn-stop-backup" class="btn btn-ghost" style="display:none; margin-top: 6px;">
+          停止備份
+        </button>
+        <button id="btn-retry-failed" class="btn btn-outline" style="display:none; margin-top: 6px;">
+          重試失敗項目
+        </button>
+        <div id="full-backup-progress" style="display:none; margin-top: 10px;">
+          <div class="progress-text" id="progress-text">準備中…</div>
+          <div class="progress-current" id="progress-current"></div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+          <div id="failed-list" style="display:none; margin-top:8px;"></div>
+        </div>
       </div>
-    </div>
-
-    <!-- 上次備份時間 -->
-    <div class="last-backup">
-      <span>&#128336; 上次備份：</span>
-      <span id="last-backup-time">—</span>
     </div>
 
     <!-- 狀態訊息 -->
@@ -495,7 +564,7 @@
   </div>
 
   <div class="footer">
-    <span>Manifest V3 &nbsp;·&nbsp; File System Access API</span>
+    Manifest V3 · File System Access API
   </div>
 
   <script src="i18n.js"></script>
