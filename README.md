@@ -42,10 +42,21 @@
 
 目前尚未上架 Chrome Web Store，請使用開發者模式手動載入：
 
-1. 下載或 Clone 本專案
+**方法一：下載 ZIP（推薦）**
+
+1. 前往 [Releases](https://github.com/pppeterlin/gemini-chat-auto-backup-tool/releases/latest)，下載最新版本的 `gemini-chat-backup-vX.X.X.zip`
+2. 解壓縮到任一資料夾
+3. 打開 Chrome，前往 `chrome://extensions/`
+4. 開啟右上角「**開發人員模式**」
+5. 點擊「**載入未封裝項目**」，選擇剛才解壓縮的資料夾
+6. 點擊工具列的擴充套件圖示即可使用
+
+**方法二：Clone 原始碼**
+
+1. Clone 本專案：`git clone https://github.com/pppeterlin/gemini-chat-auto-backup-tool.git`
 2. 打開 Chrome，前往 `chrome://extensions/`
 3. 開啟右上角「**開發人員模式**」
-4. 點擊「**載入未封裝項目**」，選擇本專案資料夾
+4. 點擊「**載入未封裝項目**」，選擇專案資料夾
 5. 點擊工具列的擴充套件圖示即可使用
 
 ---
@@ -92,7 +103,12 @@
 ├── sidebar_scanner.js    # 側邊欄掃描腳本（全量備份用）
 ├── popup.html            # Popup UI
 ├── popup.js              # Popup 互動邏輯
-├── icon.png              # 套件圖示
+├── i18n.js               # 多語言系統
+├── i18n/
+│   └── messages.json     # 翻譯字串（10 種語言）
+├── icon.svg              # 圖示向量原始檔
+├── icon.png              # 套件圖示（128×128）
+├── pack.sh               # 打包腳本（產生 zip）
 └── test/
     ├── test.html         # 瀏覽器互動測試頁
     └── run_tests.js      # 命令列測試腳本（需 JavaScriptCore）
@@ -121,6 +137,20 @@ $JSC test/run_tests.js
 ---
 
 ## Changelog
+
+### v2.0.0 — 2026-04-18
+
+#### UI 全面重設計
+- **新視覺風格**：低飽和度 × 高對比色系（米白底、近黑字、珊瑚色品牌色），Header 去漸層改白底
+- **卡片分區**：資料夾、備份頻率、歷史備份各自獨立卡片，功能邊界一目了然
+- **CTA 金字塔**：「立即備份」為唯一主色按鈕，其餘降為 outline/ghost
+- **全新貓咪 Icon**：加菲貓形象，圓臉 + 招牌圓眉 + 黑色眼睛；提供 SVG 向量原始檔
+
+#### 修正
+- 修正 `updateUIText()` 使用舊 selector 導致 `init()` 中途崩潰，連帶造成資料夾持久化失效、全量備份進度不顯示、語言切換無效
+
+#### 其他
+- 新增 `pack.sh` 打包腳本，Release 頁面提供 zip 下載
 
 ### v1.1.0 — 2026-04-16
 
@@ -193,10 +223,21 @@ A Chrome extension that automatically backs up your [Google Gemini](https://gemi
 
 Not yet published to the Chrome Web Store. Load manually via Developer Mode:
 
-1. Download or clone this repository
+**Option A: Download ZIP (recommended)**
+
+1. Go to [Releases](https://github.com/pppeterlin/gemini-chat-auto-backup-tool/releases/latest) and download the latest `gemini-chat-backup-vX.X.X.zip`
+2. Unzip to any folder
+3. Open Chrome and go to `chrome://extensions/`
+4. Enable **Developer mode** (top-right toggle)
+5. Click **"Load unpacked"** and select the unzipped folder
+6. Click the extension icon in the toolbar to open the popup
+
+**Option B: Clone the repository**
+
+1. `git clone https://github.com/pppeterlin/gemini-chat-auto-backup-tool.git`
 2. Open Chrome and go to `chrome://extensions/`
 3. Enable **Developer mode** (top-right toggle)
-4. Click **"Load unpacked"** and select the project folder
+4. Click **"Load unpacked"** and select the cloned folder
 5. Click the extension icon in the toolbar to open the popup
 
 ---
@@ -243,7 +284,13 @@ Select an interval from the "Auto-backup" dropdown in the popup. The extension w
 ├── sidebar_scanner.js    # Sidebar scanner (used for full history backup)
 ├── popup.html            # Popup UI
 ├── popup.js              # Popup interaction logic
-├── icon.png              # Extension icon
+├── i18n.js               # Internationalization system
+├── i18n/
+│   └── messages.json     # Translation strings (10 languages)
+├── icon.svg              # Icon source (vector)
+├── icon.png              # Extension icon (128×128)
+├── pack.sh               # Packaging script (produces release zip)
+├── dev/                  # Development utilities (not included in extension)
 └── test/
     ├── test.html         # Browser-based interactive test page
     └── run_tests.js      # CLI test runner (requires JavaScriptCore)
