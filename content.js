@@ -1,8 +1,8 @@
 // content.js - 在 Gemini 分頁中執行，擷取對話內容並回傳給 background.js
 // 透過 chrome.scripting.executeScript({ files: ['content.js'] }) 注入
-// 最後一個表達式的值會作為 executeScript 的 result 回傳
+// Chrome 111+ 支援 async IIFE 回傳 Promise，executeScript 會等待 resolve
 
-(function scrapeGeminiConversation() {
+(async function scrapeGeminiConversation() {
   // ── Shadow DOM 穿透查詢 ───────────────────────────────────────────────────────
   function queryShadowAll(root, selector) {
     const results = [];
@@ -23,6 +23,10 @@
     return results;
   }
 
+  // ── 圖片追蹤（跨 htmlToMarkdown 呼叫共用）──────────────────────────────────────
+  const imageList = []; // { filename, src, buttonEl? }
+  let imgCounter = 0;
+
   // ── HTML → Markdown 轉換器 ────────────────────────────────────────────────────
   function htmlToMarkdown(rootEl) {
     if (!rootEl) return '';
@@ -38,7 +42,7 @@
 
       // 忽略隱藏元素和無意義標籤
       if (style && style.display === 'none') return '';
-      if (['script', 'style', 'button', 'svg', 'noscript'].includes(tag)) return '';
+      if (['script', 'style', 'svg', 'noscript'].includes(tag)) return '';
 
       const inner = () => Array.from(node.childNodes).map(convert).join('');
 
@@ -108,6 +112,34 @@
           });
           return `\n${lines.join('\n')}\n`;
         }
+        case 'button': {
+          // Gemini 用 button 包住圖片預覽；只取出 <img>，跳過按鈕文字標籤
+          // 同時記錄 buttonEl，之後可點擊燈箱取得原始檔
+          const imgs = Array.from(node.querySelectorAll('img'));
+          if (!imgs.length) return '';
+          return imgs.map(img => {
+            const beforeLen = imageList.length;
+            const mdStr = convert(img);
+            if (imageList.length > beforeLen) {
+              // 將 button 元素存入最後推入的 imageList entry
+              imageList[imageList.length - 1].buttonEl = node;
+            }
+            return mdStr;
+          }).join('');
+        }
+        case 'img': {
+          const src = node.getAttribute('src') || node.getAttribute('data-src') || '';
+          // 跳過空 src 或已內嵌的 data URL
+          if (!src || src.startsWith('data:')) return '';
+          const alt = node.getAttribute('alt') || '';
+          imgCounter++;
+          const urlPath = src.split('?')[0].split('#')[0];
+          const extMatch = urlPath.match(/\.(\w{2,4})$/i);
+          const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
+          const filename = `image_${imgCounter}.${ext}`;
+          imageList.push({ filename, src });
+          return `\n![${alt}](media/${filename})\n`;
+        }
         default: return inner();
       }
     }
@@ -115,6 +147,16 @@
     return convert(rootEl)
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+  }
+
+  // ── Gemini UI 冗餘標籤清除 ────────────────────────────────────────────────────
+  // 「你說了」可能出現在圖片 ref 後面（圖片在 DOM 前面），用全域 replace
+  function cleanUserMd(md) {
+    return md.replace(/你說了[\s\n]+/g, '').trim();
+  }
+
+  function cleanModelMd(md) {
+    return md.replace(/^(##\s*)?Gemini\s*說了[\s\n]+/, '').trim();
   }
 
   // ── 簡單雜湊（用於增量備份偵測）────────────────────────────────────────────────
@@ -128,18 +170,14 @@
 
   // ── 擷取對話標題 ──────────────────────────────────────────────────────────────
   function getTitle() {
-    // 1. Gemini 的 data-test-id（最穩定，確認存在於實際 DOM）
     const testIdEl = document.querySelector('[data-test-id="conversation-title"]');
     if (testIdEl?.textContent?.trim()) return testIdEl.textContent.trim();
 
-    // 2. 其他明確的對話標題選擇器（穿透 Shadow DOM）
     for (const sel of ['.conversation-title', '[data-conversation-title]', '.chat-title']) {
       const el = queryShadowAll(document, sel)[0];
       if (el?.textContent?.trim()) return el.textContent.trim();
     }
 
-    // 3. 側邊欄中目前選取的對話連結（對 Gem 對話最可靠，避免抓到 Gem 名稱）
-    //    優先 aria-label（通常包含完整對話標題），再 fallback 到 textContent
     for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
       if (el.getAttribute('aria-current') === 'page' ||
           el.getAttribute('aria-selected') === 'true') {
@@ -150,13 +188,11 @@
       }
     }
 
-    // 4. Fallback: 從 <title> 移除 " - Gemini" 後綴
     return document.title.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim() || '未命名對話';
   }
 
   // ── 擷取訊息清單 ──────────────────────────────────────────────────────────────
   function findMessages() {
-    // 使用者訊息選擇器（依可能性排序）
     const userSelectors = [
       'user-query',
       '.user-query-content',
@@ -165,7 +201,6 @@
       '.human-turn',
     ];
 
-    // Gemini 回應選擇器
     const modelSelectors = [
       'model-response',
       '.model-response-text',
@@ -186,7 +221,6 @@
       if (found.length) { modelEls = found; break; }
     }
 
-    // Fallback：嘗試尋找含有 conversation-turn 結構的容器
     if (!userEls.length && !modelEls.length) {
       const turnSelectors = ['conversation-turn', '.conversation-turn', '[data-turn-index]'];
       for (const sel of turnSelectors) {
@@ -203,6 +237,54 @@
     }
 
     return { userEls, modelEls };
+  }
+
+  // ── 燈箱操作：點擊圖片預覽按鈕，取得原始圖 URL 與原始檔名 ─────────────────────────
+  function openLightboxAndGetInfo(buttonEl) {
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve(result);
+      };
+
+      const observer = new MutationObserver(() => {
+        const trustedImg = document.querySelector('[data-test-id="trusted-image"]');
+        if (!trustedImg?.src) return;
+        const titleEl = document.querySelector(
+          'expansion-dialog .title, .image-title .title, .dialog-title .title'
+        );
+        finish({
+          imageUrl: trustedImg.src,
+          originalName: titleEl?.textContent?.trim() || null,
+        });
+      });
+
+      // childList 偵測對話框插入，attributes 偵測 src 延遲設定
+      observer.observe(document.body, {
+        childList: true, subtree: true,
+        attributes: true, attributeFilter: ['src'],
+      });
+
+      const timer = setTimeout(() => finish(null), 5000);
+      buttonEl.click();
+    });
+  }
+
+  async function closeLightbox() {
+    const closeBtn = document.querySelector(
+      '[mat-dialog-close], button[aria-label="關閉"], button[aria-label="Close"]'
+    );
+    if (!closeBtn) return;
+    closeBtn.click();
+    // 輪詢直到對話框消失，通常 100–200ms；上限 800ms
+    const deadline = Date.now() + 800;
+    while (document.querySelector('[data-test-id="trusted-image"]') && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 30));
+    }
   }
 
   // ── 主邏輯 ─────────────────────────────────────────────────────────────────────
@@ -228,17 +310,76 @@
   const maxLen = Math.max(userEls.length, modelEls.length);
   for (let i = 0; i < maxLen; i++) {
     if (i < userEls.length) {
-      const userMd = htmlToMarkdown(userEls[i]);
+      const userMd = cleanUserMd(htmlToMarkdown(userEls[i]));
       messages.push({ role: 'user', markdown: userMd });
       md += `## 使用者\n\n${userMd}\n\n`;
     }
     if (i < modelEls.length) {
-      const modelMd = htmlToMarkdown(modelEls[i]);
+      const modelMd = cleanModelMd(htmlToMarkdown(modelEls[i]));
       messages.push({ role: 'model', markdown: modelMd });
       md += `## Gemini\n\n${modelMd}\n\n`;
     }
     if (i < maxLen - 1) md += '---\n\n';
   }
+
+  // ── 圖片下載（兩階段）────────────────────────────────────────────────────────
+  // Phase 1（循序）：點擊燈箱取得 blob URL + 原始檔名，更新 md 參照
+  // Phase 2（並行）：Promise.all 同時 fetch 所有圖片，縮短總等待時間
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+  const MIME_TO_EXT = {
+    'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+    'image/png': 'png', 'image/gif': 'gif',
+    'image/webp': 'webp', 'image/avif': 'avif',
+  };
+
+  // Phase 1: 循序點擊燈箱，收集每張圖的最終 fetchUrl
+  const downloadQueue = []; // { img, fetchUrl }
+  for (const img of imageList) {
+    let fetchUrl = img.src;
+    if (img.buttonEl) {
+      const info = await openLightboxAndGetInfo(img.buttonEl);
+      if (info) {
+        if (info.imageUrl) fetchUrl = info.imageUrl;
+        if (info.originalName && /\.\w{2,4}$/.test(info.originalName)) {
+          const newFilename = info.originalName;
+          md = md.replace(`media/${img.filename}`, `media/${newFilename}`);
+          img.filename = newFilename;
+        }
+      }
+      await closeLightbox();
+    }
+    downloadQueue.push({ img, fetchUrl });
+  }
+
+  // Phase 2: 並行 fetch — 所有圖片同時下載
+  const fetchedImages = (await Promise.all(
+    downloadQueue.map(async ({ img, fetchUrl }) => {
+      try {
+        const resp = await fetch(fetchUrl, { credentials: 'include' });
+        if (!resp.ok) return null;
+        const blob = await resp.blob();
+        if (blob.size > MAX_IMAGE_BYTES) return null;
+
+        // 依實際 MIME type 修正副檔名（各 img.filename 唯一，無競爭條件）
+        const realExt = MIME_TO_EXT[blob.type];
+        if (realExt && !img.filename.endsWith(`.${realExt}`)) {
+          const newFilename = img.filename.replace(/\.\w+$/, `.${realExt}`);
+          md = md.replace(`media/${img.filename}`, `media/${newFilename}`);
+          img.filename = newFilename;
+        }
+
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        return { filename: img.filename, dataUrl };
+      } catch (_) {
+        return null; // 下載失敗：markdown 保留佔位，但不存檔
+      }
+    })
+  )).filter(Boolean);
 
   return {
     title,
@@ -246,5 +387,6 @@
     hash: simpleHash(md),
     url: conversationUrl,
     messages,
+    images: fetchedImages, // [{ filename, dataUrl }]
   };
 })();
