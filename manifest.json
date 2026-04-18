@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Chat Backup",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "自動將 Google Gemini 對話備份為 Markdown 格式到本地資料夾",
   "permissions": ["storage", "alarms", "scripting", "tabs"],
   "host_permissions": ["https://gemini.google.com/*"],

@@ -48,6 +48,11 @@ async function setupAlarm(intervalHours) {
 
 // ── Utility functions ──────────────────────────────────────────────────────────
 
+// 隨機延遲，防止被 Google 偵測為自動化機器人
+function randomDelay(minMs, maxMs) {
+  return new Promise(r => setTimeout(r, minMs + Math.random() * (maxMs - minMs)));
+}
+
 function formatTimestamp(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -209,14 +214,64 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
       if (hasStartedLoading && info.status === 'complete') {
         clearTimeout(timeout);
         chrome.tabs.onUpdated.removeListener(onUpdated);
-        // Extra wait for dynamic content to render
-        setTimeout(resolve, extraWaitMs);
+        // Extra wait for dynamic content to render (±30% jitter to look more human)
+        setTimeout(resolve, extraWaitMs * (0.7 + Math.random() * 0.6));
       }
     }
 
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.update(tabId, { url });
   });
+}
+
+// ── 圖片儲存 helpers ───────────────────────────────────────────────────────────
+
+// 將 data URL 解碼為 Uint8Array 並寫入 mediaHandle 下的 filename
+async function saveImageFromDataUrl(mediaHandle, filename, dataUrl) {
+  const [, base64] = dataUrl.split(',');
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+  const imgHandle = await mediaHandle.getFileHandle(filename, { create: true });
+  const writable = await imgHandle.createWritable();
+  await writable.write(bytes);
+  await writable.close();
+}
+
+// 依有無圖片選擇儲存格式：
+//   有圖片（或已是資料夾格式）→ [safeTitle]_[convId]/ 資料夾 + media/ 子目錄
+//   純文字               → 與原本相同的單一 .md 檔案
+// 回傳 { filename? } 或 { folderName? }，用於更新 chrome.storage
+async function saveConversationFiles(dirHandle, safeTitle, convId, content, images, stored) {
+  const hasImages = images && images.length > 0;
+  const existingFolder = stored[`chatFolderName_${convId}`];
+
+  if (hasImages || existingFolder) {
+    const folderName = existingFolder || `${safeTitle}_${convId}`;
+    const folderHandle = await dirHandle.getDirectoryHandle(folderName, { create: true });
+
+    const mdHandle = await folderHandle.getFileHandle(`${safeTitle}.md`, { create: true });
+    const mdWritable = await mdHandle.createWritable();
+    await mdWritable.write(content);
+    await mdWritable.close();
+
+    if (hasImages) {
+      const mediaHandle = await folderHandle.getDirectoryHandle('media', { create: true });
+      for (const img of images) {
+        try { await saveImageFromDataUrl(mediaHandle, img.filename, img.dataUrl); } catch (_) {}
+      }
+    }
+
+    return { folderName };
+  }
+
+  // 純文字：沿用原有單檔格式
+  const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+  return { filename };
 }
 
 // ── Single-conversation backup ─────────────────────────────────────────────────
@@ -229,6 +284,7 @@ async function backupSingleTab(tab, dirHandle) {
   const preStored = await chrome.storage.local.get([
     `hash_${encodeURIComponent(tab.url)}`,
     `chatFilename_${convId}`,
+    `chatFolderName_${convId}`,
     `chatMsgCount_${convId}`,
   ]);
   const prevMsgCount = preStored[`chatMsgCount_${convId}`] || 0;
@@ -245,13 +301,14 @@ async function backupSingleTab(tab, dirHandle) {
     return { skipped: true, reason: '無法擷取對話內容（頁面可能不是對話頁）' };
   }
 
-  const { title, content, hash, url, messages } = data;
+  const { title, content, hash, url, messages, images } = data;
   const realConvId = stableConvId(url);
   const storageKey = `hash_${encodeURIComponent(url)}`;
   // 若 tab.url 和 content.js 拿到的 url 相同，直接複用 preStored；否則重新查詢
   const stored = realConvId === convId ? preStored : await chrome.storage.local.get([
     storageKey,
     `chatFilename_${realConvId}`,
+    `chatFolderName_${realConvId}`,
     `chatMsgCount_${realConvId}`,
   ]);
 
@@ -260,14 +317,10 @@ async function backupSingleTab(tab, dirHandle) {
   }
 
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-  // One stable file per conversation — never timestamped
-  const filename = stored[`chatFilename_${realConvId}`] || `${safeTitle}_${realConvId}.md`;
-
   const currMsgCount = messages ? messages.length : 0;
   const now = new Date().toISOString();
 
   // Safety guard: if we loaded fewer messages than last time, scroll didn't complete.
-  // Keep the more-complete existing backup instead of overwriting with partial data.
   if (prevMsgCount > 0 && currMsgCount < prevMsgCount) {
     return {
       skipped: true,
@@ -275,19 +328,20 @@ async function backupSingleTab(tab, dirHandle) {
     };
   }
 
-  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
+  const saveKeys = await saveConversationFiles(
+    dirHandle, safeTitle, realConvId, content, images || [], stored
+  );
 
-  await chrome.storage.local.set({
+  const storageUpdate = {
     [storageKey]: hash,
-    [`chatFilename_${realConvId}`]: filename,
     [`chatMsgCount_${realConvId}`]: currMsgCount,
     [`chatSyncTime_${realConvId}`]: now,
-  });
+  };
+  if (saveKeys.filename) storageUpdate[`chatFilename_${realConvId}`] = saveKeys.filename;
+  if (saveKeys.folderName) storageUpdate[`chatFolderName_${realConvId}`] = saveKeys.folderName;
+  await chrome.storage.local.set(storageUpdate);
 
-  return { saved: true, filename };
+  return { saved: true, filename: saveKeys.folderName || saveKeys.filename };
 }
 
 // ── Core backup logic (current open tabs) ──────────────────────────────────────
@@ -531,6 +585,7 @@ async function performFullHistoryBackup(limitCount = 0) {
         const stored = await chrome.storage.local.get([
           storageKey,
           `chatFilename_${convId}`,
+          `chatFolderName_${convId}`,
           `chatMsgCount_${convId}`,
         ]);
 
@@ -587,7 +642,7 @@ async function performFullHistoryBackup(limitCount = 0) {
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
-          const { content, hash, url, messages } = data;
+          const { content, hash, url, messages, images } = data;
           const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
 
           // hash 一致 → 內容確認沒有變化，跳過
@@ -612,22 +667,22 @@ async function performFullHistoryBackup(limitCount = 0) {
           // Prefer sidebar title for filename (more reliable for Gem chats)
           const filenameTitle = conv.title || data.title || '未命名對話';
           const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-          const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
 
-          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(content);
-          await writable.close();
+          const saveKeys = await saveConversationFiles(
+            dirHandle, safeTitle, convId, content, images || [], stored
+          );
 
           if (convEntry) convEntry.status = 'done';
 
           const now = new Date().toISOString();
-          await chrome.storage.local.set({
+          const storageUpdate = {
             [realStorageKey]: hash,
-            [`chatFilename_${convId}`]: filename,
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
-          });
+          };
+          if (saveKeys.filename) storageUpdate[`chatFilename_${convId}`] = saveKeys.filename;
+          if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
+          await chrome.storage.local.set(storageUpdate);
         }
       } catch (err) {
         if (convEntry) { convEntry.status = 'failed'; convEntry.reason = err.message; }
@@ -636,6 +691,11 @@ async function performFullHistoryBackup(limitCount = 0) {
 
       state.done++;
       await saveState();
+
+      // 每次換頁後隨機休息，避免高頻操作被 Google 偵測為機器人
+      await randomDelay(1200, 2800);
+      // 每 10 個對話額外休息一次（模擬人類暫停）
+      if (state.done % 10 === 0) await randomDelay(3000, 6000);
     }
 
     // Navigate back to where we started
@@ -753,6 +813,7 @@ async function performRetryFailedBackup() {
         const stored = await chrome.storage.local.get([
           storageKey,
           `chatFilename_${convId}`,
+          `chatFolderName_${convId}`,
           `chatMsgCount_${convId}`,
         ]);
 
@@ -771,28 +832,28 @@ async function performRetryFailedBackup() {
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
-          const { content, hash, url, messages } = data;
+          const { content, hash, url, messages, images } = data;
           const realStorageKey = `hash_${encodeURIComponent(url || target.url)}`;
 
           const filenameTitle = target.title || data.title || '未命名對話';
           const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
-          const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
 
-          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(content);
-          await writable.close();
+          const saveKeys = await saveConversationFiles(
+            dirHandle, safeTitle, convId, content, images || [], stored
+          );
 
           if (convEntry) convEntry.status = 'done';
 
           const currMsgCount = messages ? messages.length : 0;
           const now = new Date().toISOString();
-          await chrome.storage.local.set({
+          const storageUpdate = {
             [realStorageKey]: hash,
-            [`chatFilename_${convId}`]: filename,
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
-          });
+          };
+          if (saveKeys.filename) storageUpdate[`chatFilename_${convId}`] = saveKeys.filename;
+          if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
+          await chrome.storage.local.set(storageUpdate);
         }
       } catch (err) {
         if (convEntry) { convEntry.status = 'failed'; convEntry.reason = err.message; }
@@ -801,6 +862,9 @@ async function performRetryFailedBackup() {
 
       state.done++;
       await saveState();
+
+      await randomDelay(1200, 2800);
+      if (state.done % 10 === 0) await randomDelay(3000, 6000);
     }
 
     try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
