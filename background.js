@@ -238,40 +238,26 @@ async function saveImageFromDataUrl(mediaHandle, filename, dataUrl) {
   await writable.close();
 }
 
-// 依有無圖片選擇儲存格式：
-//   有圖片（或已是資料夾格式）→ [safeTitle]_[convId]/ 資料夾 + media/ 子目錄
-//   純文字               → 與原本相同的單一 .md 檔案
-// 回傳 { filename? } 或 { folderName? }，用於更新 chrome.storage
+// 所有對話統一輸出為資料夾格式：[safeTitle]_[convId]/ + [safeTitle].md
+// 有圖片時額外建立 media/ 子目錄
+// 回傳 { folderName }，用於更新 chrome.storage
 async function saveConversationFiles(dirHandle, safeTitle, convId, content, images, stored) {
-  const hasImages = images && images.length > 0;
-  const existingFolder = stored[`chatFolderName_${convId}`];
+  const folderName = stored[`chatFolderName_${convId}`] || `${safeTitle}_${convId}`;
+  const folderHandle = await dirHandle.getDirectoryHandle(folderName, { create: true });
 
-  if (hasImages || existingFolder) {
-    const folderName = existingFolder || `${safeTitle}_${convId}`;
-    const folderHandle = await dirHandle.getDirectoryHandle(folderName, { create: true });
+  const mdHandle = await folderHandle.getFileHandle(`${safeTitle}.md`, { create: true });
+  const mdWritable = await mdHandle.createWritable();
+  await mdWritable.write(content);
+  await mdWritable.close();
 
-    const mdHandle = await folderHandle.getFileHandle(`${safeTitle}.md`, { create: true });
-    const mdWritable = await mdHandle.createWritable();
-    await mdWritable.write(content);
-    await mdWritable.close();
-
-    if (hasImages) {
-      const mediaHandle = await folderHandle.getDirectoryHandle('media', { create: true });
-      for (const img of images) {
-        try { await saveImageFromDataUrl(mediaHandle, img.filename, img.dataUrl); } catch (_) {}
-      }
+  if (images && images.length > 0) {
+    const mediaHandle = await folderHandle.getDirectoryHandle('media', { create: true });
+    for (const img of images) {
+      try { await saveImageFromDataUrl(mediaHandle, img.filename, img.dataUrl); } catch (_) {}
     }
-
-    return { folderName };
   }
 
-  // 純文字：沿用原有單檔格式
-  const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
-  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
-  return { filename };
+  return { folderName };
 }
 
 // ── Single-conversation backup ─────────────────────────────────────────────────
@@ -312,7 +298,9 @@ async function backupSingleTab(tab, dirHandle) {
     `chatMsgCount_${realConvId}`,
   ]);
 
-  if (stored[storageKey] === hash) {
+  // hash 相同且已有資料夾備份 → 真正略過；hash 相同但只有舊 .md → 繼續以遷移至資料夾格式
+  const alreadyFolder = !!stored[`chatFolderName_${realConvId}`];
+  if (stored[storageKey] === hash && alreadyFolder) {
     return { skipped: true, reason: '無新內容' };
   }
 
@@ -645,8 +633,9 @@ async function performFullHistoryBackup(limitCount = 0) {
           const { content, hash, url, messages, images } = data;
           const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
 
-          // hash 一致 → 內容確認沒有變化，跳過
-          if (stored[storageKey] === hash) {
+          // hash 相同且已有資料夾備份 → 略過；只有舊 .md → 繼續遷移
+          const alreadyFolder = !!stored[`chatFolderName_${convId}`];
+          if (stored[storageKey] === hash && alreadyFolder) {
             if (convEntry) convEntry.status = 'skipped';
             state.skipped++;
             state.done++;
