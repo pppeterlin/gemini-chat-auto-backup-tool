@@ -55,7 +55,10 @@
     "completedTime": "完成時間：",
     "processing": "處理中：",
     "failures": "個失敗",
-    "done": "完成"
+    "done": "完成",
+    "retryFailed": "重試失敗項目",
+    "retryingFailed": "重試中…",
+    "failedList": "失敗清單（{n} 個）"
   },
   "zh-CN": {
     "appName": "Gemini Chat Backup",
@@ -112,7 +115,10 @@
     "completedTime": "完成时间：",
     "processing": "处理中：",
     "failures": "个失败",
-    "done": "完成"
+    "done": "完成",
+    "retryFailed": "重试失败项目",
+    "retryingFailed": "重试中…",
+    "failedList": "失败清单（{n} 个）"
   },
   "en": {
     "appName": "Gemini Chat Backup",
@@ -169,7 +175,10 @@
     "completedTime": "Completed at: ",
     "processing": "Processing: ",
     "failures": "failure(s)",
-    "done": "completed"
+    "done": "completed",
+    "retryFailed": "Retry Failed",
+    "retryingFailed": "Retrying…",
+    "failedList": "Failed items ({n})"
   },
   "ja": {
     "appName": "Gemini Chat Backup",
@@ -226,7 +235,10 @@
     "completedTime": "完了時刻：",
     "processing": "処理中：",
     "failures": "個の失敗",
-    "done": "完了"
+    "done": "完了",
+    "retryFailed": "失敗した項目を再試行",
+    "retryingFailed": "再試行中…",
+    "failedList": "失敗リスト（{n} 件）"
   },
   "ko": {
     "appName": "Gemini Chat Backup",
@@ -283,7 +295,10 @@
     "completedTime": "완료 시간：",
     "processing": "처리 중：",
     "failures": "개의 실패",
-    "done": "완료"
+    "done": "완료",
+    "retryFailed": "실패 항목 재시도",
+    "retryingFailed": "재시도 중…",
+    "failedList": "실패 목록（{n}개）"
   },
   "fr": {
     "appName": "Gemini Chat Backup",
@@ -340,7 +355,10 @@
     "completedTime": "Terminé à：",
     "processing": "Traitement：",
     "failures": "échec(s)",
-    "done": "terminé"
+    "done": "terminé",
+    "retryFailed": "Réessayer les échecs",
+    "retryingFailed": "Nouvelle tentative…",
+    "failedList": "Éléments échoués ({n})"
   },
   "es": {
     "appName": "Gemini Chat Backup",
@@ -397,7 +415,10 @@
     "completedTime": "Completado en：",
     "processing": "Procesando：",
     "failures": "fallo(s)",
-    "done": "completado"
+    "done": "completado",
+    "retryFailed": "Reintentar fallidos",
+    "retryingFailed": "Reintentando…",
+    "failedList": "Elementos fallidos ({n})"
   },
   "pt": {
     "appName": "Gemini Chat Backup",
@@ -454,7 +475,10 @@
     "completedTime": "Concluído em：",
     "processing": "Processando：",
     "failures": "falha(s)",
-    "done": "concluído"
+    "done": "concluído",
+    "retryFailed": "Tentar novamente os falhos",
+    "retryingFailed": "Tentando novamente…",
+    "failedList": "Itens com falha ({n})"
   },
   "ar": {
     "appName": "Gemini Chat Backup",
@@ -511,7 +535,10 @@
     "completedTime": "اكتمل في：",
     "processing": "جاري المعالجة：",
     "failures": "فشل",
-    "done": "اكتمل"
+    "done": "اكتمل",
+    "retryFailed": "إعادة المحاولة للفاشلة",
+    "retryingFailed": "إعادة المحاولة…",
+    "failedList": "العناصر الفاشلة ({n})"
   },
   "ru": {
     "appName": "Gemini Chat Backup",
@@ -568,6 +595,9 @@
     "completedTime": "Завершено в：",
     "processing": "Обработка：",
     "failures": "ошибка(и)",
-    "done": "завершено"
+    "done": "завершено",
+    "retryFailed": "Повторить неудачные",
+    "retryingFailed": "Повтор…",
+    "failedList": "Неудачные элементы ({n})"
   }
 }

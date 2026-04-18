@@ -132,9 +132,26 @@ function setSyncStatus(status, lastSyncTime) {
 
 // ── 全量備份進度 UI ────────────────────────────────────────────────────────────
 
+function renderFailedList(errors) {
+  const container = document.getElementById('failed-list');
+  if (!errors?.length) {
+    container.style.display = 'none';
+    container.innerHTML = '';
+    return;
+  }
+  const items = errors.map(e => {
+    const title = e.title || e.url || '未知對話';
+    const reason = e.reason ? `<span class="fail-reason"> — ${e.reason}</span>` : '';
+    return `<li>${title}${reason}</li>`;
+  }).join('');
+  container.innerHTML = `<details><summary>${i18nText('failedList').replace('{n}', errors.length)}</summary><ul>${items}</ul></details>`;
+  container.style.display = 'block';
+}
+
 function updateFullBackupUI(state) {
   const btn = document.getElementById('btn-full-backup');
   const stopBtn = document.getElementById('btn-stop-backup');
+  const retryBtn = document.getElementById('btn-retry-failed');
   const progressDiv = document.getElementById('full-backup-progress');
   const progressText = document.getElementById('progress-text');
   const progressCurrent = document.getElementById('progress-current');
@@ -147,6 +164,7 @@ function updateFullBackupUI(state) {
     stopBtn.style.display = 'none';
     stopBtn.disabled = false;
     stopBtn.textContent = `⏹ ${i18nText('stopBackup')}`;
+    retryBtn.style.display = 'none';
   }
 
   if (!state || (!state.inProgress && !state.completedAt && !state.fatalError && !state.stoppedByUser)) {
@@ -168,15 +186,18 @@ function updateFullBackupUI(state) {
     progressText.style.color = '#c5221f';
     progressCurrent.textContent = '';
     progressBar.style.width = '0%';
+    renderFailedList([]);
     return;
   }
 
   if (state.inProgress) {
     btn.disabled = true;
-    btn.innerHTML = `<span class="spinner"></span> ${i18nText('backingUp')}`;
+    btn.innerHTML = `<span class="spinner"></span> ${state.isRetrying ? i18nText('retryingFailed') : i18nText('backingUp')}`;
     stopBtn.style.display = '';
+    retryBtn.style.display = 'none';
     progressDiv.style.display = 'block';
     progressText.style.color = '#5f6368';
+    renderFailedList([]);
 
     if (state.total === 0) {
       progressText.textContent = i18nText('scanning');
@@ -208,13 +229,15 @@ function updateFullBackupUI(state) {
     progressBar.style.width = state.total > 0
       ? `${Math.round((state.done / state.total) * 100)}%`
       : '0%';
+    renderFailedList(state.errors);
+    if (state.errors?.length) retryBtn.style.display = '';
     return;
   }
 
   // 正常完成
   resetToIdle();
   progressDiv.style.display = 'block';
-  progressText.style.color = '#188038';
+  progressText.style.color = state.errors?.length ? '#b06000' : '#188038';
 
   // excluded = 超出 N 個 limit 的對話（全量備份時為 0）
   const excludedNote = state.excluded > 0
@@ -235,6 +258,8 @@ function updateFullBackupUI(state) {
     ? `${i18nText('completedTime')}${formatBackupTime(state.completedAt)}`
     : '';
   progressBar.style.width = state.total > 0 ? '100%' : '0%';
+  renderFailedList(state.errors);
+  if (state.errors?.length) retryBtn.style.display = '';
 }
 
 // ── 查詢當前對話同步狀態 ──────────────────────────────────────────────────────
@@ -467,6 +492,9 @@ function updateUIText() {
     stopBtn.textContent = `⏹ ${i18nText('stopBackup')}`;
   }
 
+  // Retry button
+  document.getElementById('btn-retry-failed').textContent = `↻ ${i18nText('retryFailed')}`;
+
   // Last backup
   document.querySelector('.last-backup').innerHTML =
     `<span>⏰ ${i18nText('lastBackupTime')}</span><span id="last-backup-time">—</span>`;
@@ -595,6 +623,33 @@ document.getElementById('btn-full-backup').addEventListener('click', async () =>
   const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
   await chrome.storage.local.set({ fullBackupLimit: limitCount });
   await chrome.runtime.sendMessage({ action: 'startFullBackup', limitCount });
+});
+
+// ── Event: 重試失敗項目 ────────────────────────────────────────────────────────
+
+document.getElementById('btn-retry-failed').addEventListener('click', async () => {
+  clearStatus();
+
+  try {
+    const handle = await getHandleFromDB();
+    if (!handle) {
+      showStatus('請先選擇備份資料夾', 'error');
+      return;
+    }
+    const permission = await handle.queryPermission({ mode: 'readwrite' });
+    if (permission === 'prompt') {
+      await handle.requestPermission({ mode: 'readwrite' });
+    }
+    if (permission === 'denied') {
+      showStatus('資料夾存取被拒絕，請重新授權', 'error');
+      return;
+    }
+  } catch (err) {
+    showStatus(`授權失敗：${err.message}`, 'error');
+    return;
+  }
+
+  await chrome.runtime.sendMessage({ action: 'retryFailedBackup' });
 });
 
 // ── Event: 停止全量備份 ────────────────────────────────────────────────────────

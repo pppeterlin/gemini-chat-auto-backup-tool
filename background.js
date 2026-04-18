@@ -579,7 +579,7 @@ async function performFullHistoryBackup(limitCount = 0) {
 
         const data = results?.[0]?.result;
         if (!data?.content) {
-          state.errors.push(`${conv.title}: 無法擷取內容`);
+          state.errors.push({ url: conv.url, title: conv.title, reason: '無法擷取內容' });
         } else {
           const { content, hash, url, messages } = data;
           const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
@@ -620,7 +620,7 @@ async function performFullHistoryBackup(limitCount = 0) {
           });
         }
       } catch (err) {
-        state.errors.push(`${conv.title}: ${err.message}`);
+        state.errors.push({ url: conv.url, title: conv.title, reason: err.message });
         console.error('[FullBackup] Conversation error:', err);
       }
 
@@ -639,6 +639,156 @@ async function performFullHistoryBackup(limitCount = 0) {
 
   } catch (err) {
     console.error('[FullBackup] Fatal error:', err);
+    state.inProgress = false;
+    state.fatalError = err.message;
+    await chrome.storage.local.set({ fullBackupState: state });
+  }
+}
+
+// ── 重試失敗項目 ───────────────────────────────────────────────────────────────
+
+async function performRetryFailedBackup() {
+  const { fullBackupState: currentState } = await chrome.storage.local.get('fullBackupState');
+  if (currentState?.inProgress) return;
+
+  const failedConvs = (currentState?.errors || []).filter(e => e.url);
+  if (!failedConvs.length) return;
+
+  const state = {
+    ...currentState,
+    inProgress: true,
+    total: failedConvs.length,
+    done: 0,
+    skipped: 0,
+    errors: [],
+    currentTitle: '',
+    currentUrl: '',
+    startedAt: new Date().toISOString(),
+    lastUpdated: new Date().toISOString(),
+    completedAt: null,
+    stoppedByUser: false,
+    fatalError: null,
+    isRetrying: true,
+  };
+  await chrome.storage.local.set({ fullBackupState: state });
+
+  async function saveState() {
+    state.lastUpdated = new Date().toISOString();
+    await chrome.storage.local.set({ fullBackupState: { ...state } });
+  }
+
+  try {
+    const dirHandle = await getFromDB('directoryHandle');
+    if (!dirHandle) {
+      state.inProgress = false;
+      state.fatalError = '尚未設定備份資料夾，請先選擇資料夾';
+      await saveState();
+      return;
+    }
+
+    const permission = await dirHandle.queryPermission({ mode: 'readwrite' });
+    if (permission !== 'granted') {
+      state.inProgress = false;
+      state.fatalError = '資料夾存取權限已遺失，請開啟 Popup 重新授權';
+      await saveState();
+      return;
+    }
+
+    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    if (!tabs.length) {
+      state.inProgress = false;
+      state.fatalError = '請先開啟 Gemini 分頁，並確認側邊欄已展開';
+      await saveState();
+      return;
+    }
+
+    const tab = tabs[0];
+    const tabId = tab.id;
+    const originalUrl = tab.url;
+
+    for (const conv of failedConvs) {
+      { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+        if (s) {
+          await chrome.storage.local.remove('stopBackupRequested');
+          state.inProgress = false;
+          state.stoppedByUser = true;
+          state.currentTitle = '';
+          state.currentUrl = '';
+          state.completedAt = new Date().toISOString();
+          await saveState();
+          try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+          return;
+        }
+      }
+
+      state.currentTitle = conv.title;
+      state.currentUrl = conv.url;
+      await saveState();
+
+      try {
+        const convId = stableConvId(conv.url);
+        const storageKey = `hash_${encodeURIComponent(conv.url)}`;
+        const stored = await chrome.storage.local.get([
+          storageKey,
+          `chatFilename_${convId}`,
+          `chatMsgCount_${convId}`,
+        ]);
+
+        const isGemChat = conv.url.includes('/gem/');
+        await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
+
+        // 重試時不信任舊的 msgCount，做完整 scroll
+        await scrollToLoadAllMessages(tabId, 0);
+
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          files: ['content.js'],
+        });
+
+        const data = results?.[0]?.result;
+        if (!data?.content) {
+          state.errors.push({ url: conv.url, title: conv.title, reason: '無法擷取內容' });
+        } else {
+          const { content, hash, url, messages } = data;
+          const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
+
+          const filenameTitle = conv.title || data.title || '未命名對話';
+          const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+          const filename = stored[`chatFilename_${convId}`] || `${safeTitle}_${convId}.md`;
+
+          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(content);
+          await writable.close();
+
+          const currMsgCount = messages ? messages.length : 0;
+          const now = new Date().toISOString();
+          await chrome.storage.local.set({
+            [realStorageKey]: hash,
+            [`chatFilename_${convId}`]: filename,
+            [`chatMsgCount_${convId}`]: currMsgCount,
+            [`chatSyncTime_${convId}`]: now,
+          });
+        }
+      } catch (err) {
+        state.errors.push({ url: conv.url, title: conv.title, reason: err.message });
+        console.error('[RetryBackup] Conversation error:', err);
+      }
+
+      state.done++;
+      await saveState();
+    }
+
+    try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+
+    state.inProgress = false;
+    state.currentTitle = '';
+    state.currentUrl = '';
+    state.completedAt = new Date().toISOString();
+    await saveState();
+
+  } catch (err) {
+    console.error('[RetryBackup] Fatal error:', err);
     state.inProgress = false;
     state.fatalError = err.message;
     await chrome.storage.local.set({ fullBackupState: state });
@@ -683,6 +833,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'stopFullBackup') {
     chrome.storage.local.set({ stopBackupRequested: true });
     sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.action === 'retryFailedBackup') {
+    performRetryFailedBackup(); // fire-and-forget; progress tracked in storage
+    sendResponse({ started: true });
     return true;
   }
 

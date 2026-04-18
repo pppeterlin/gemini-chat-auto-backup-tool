@@ -266,6 +266,29 @@
       transition: width 0.4s ease;
       width: 0%;
     }
+    #failed-list {
+      font-size: 11px;
+      color: #5f6368;
+    }
+    #failed-list summary {
+      cursor: pointer;
+      color: #c5221f;
+      font-weight: 500;
+      user-select: none;
+      padding: 2px 0;
+    }
+    #failed-list ul {
+      margin: 4px 0 0 0;
+      padding-left: 14px;
+    }
+    #failed-list li {
+      margin-bottom: 3px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    #failed-list .fail-reason {
+      color: #9aa0a6;
+    }
 
     /* Language Selector */
     .lang-selector {
@@ -447,12 +470,16 @@
       <button id="btn-stop-backup" class="btn btn-secondary" style="display:none; margin-top: 6px;">
         &#9209; 停止備份
       </button>
+      <button id="btn-retry-failed" class="btn btn-secondary" style="display:none; margin-top: 6px;">
+        &#8635; 重試失敗項目
+      </button>
       <div id="full-backup-progress" style="display:none;">
         <div class="progress-text" id="progress-text">準備中…</div>
         <div class="progress-current" id="progress-current"></div>
         <div class="progress-bar-wrap">
           <div class="progress-bar" id="progress-bar"></div>
         </div>
+        <div id="failed-list" style="display:none; margin-top:8px;"></div>
       </div>
     </div>
 
