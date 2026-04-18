@@ -29,7 +29,16 @@
 ### 輸出格式
 
 - **Markdown 輸出**：保留標題、粗體、斜體、清單、程式碼塊、表格等格式
-- **固定檔名**：命名格式為 `[對話標題]_[chatId].md`，同一對話永遠對應同一個檔案，重複備份直接覆寫
+- **圖片導出**：含使用者上傳圖片的對話會自動輸出為資料夾格式，圖片以原始尺寸與原始檔名儲存於 `media/` 子目錄
+  ```
+  [對話標題]_[chatId]/
+  ├── [對話標題].md
+  └── media/
+      ├── 51282.jpg
+      └── photo.png
+  ```
+- **純文字對話**：無圖片時維持原有單一 `.md` 檔案，不影響現有備份
+- **固定命名**：同一對話永遠對應同一個檔案或資料夾，重複備份直接覆寫
 
 ### 即時狀態
 
@@ -138,6 +147,17 @@ $JSC test/run_tests.js
 
 ## Changelog
 
+### v2.1.0 — 2026-04-18
+
+#### 新增功能
+- **圖片導出**：自動擷取使用者上傳的圖片，以原始尺寸與原始檔名儲存於 `media/` 子目錄；含圖片的對話改為資料夾格式輸出，純文字對話維持原有 `.md` 單檔格式
+- **全尺寸圖片**：自動點擊燈箱取得原始全尺寸檔案（而非縮圖），並從對話框標題取得原始檔名（如 `photo.jpg`）
+
+#### 改善
+- **文字清理**：備份內容自動移除 Gemini UI 注入的冗餘標籤（「你說了」、「Gemini 說了」），輸出更乾淨
+- **圖片下載提速**：改為兩階段下載（循序點燈箱取 URL → 並行 fetch 所有圖片），多圖對話速度顯著提升；燈箱關閉改用輪詢取代固定等待，縮短單次延遲
+- **全量備份反偵測**：換頁後加入 1.2–2.8 秒隨機延遲，每 10 個對話額外休息 3–6 秒；導航等待時間加入 ±30% jitter，避免高頻規律操作被 Google 偵測為自動化機器人
+
 ### v2.0.0 — 2026-04-18
 
 #### UI 全面重設計
@@ -210,7 +230,16 @@ A Chrome extension that automatically backs up your [Google Gemini](https://gemi
 ### Output
 
 - **Markdown format**: Preserves headings, bold, italic, lists, code blocks, tables, and links
-- **Stable filenames**: Format is `[title]_[chatId].md` — the same conversation always maps to the same file; repeated backups overwrite in place
+- **Image export**: Conversations with user-uploaded images are saved as a folder containing the markdown file and a `media/` subdirectory with full-size images at their original filenames
+  ```
+  [title]_[chatId]/
+  ├── [title].md
+  └── media/
+      ├── photo.jpg
+      └── screenshot.png
+  ```
+- **Text-only chats**: Saved as a single `.md` file as before — no change to existing backups
+- **Stable naming**: The same conversation always maps to the same file or folder; repeated backups overwrite in place
 
 ### Live Status
 
