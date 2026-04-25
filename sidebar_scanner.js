@@ -49,53 +49,15 @@
   }
 
   // 判斷單一對話連結元素是否為「已釘選」。
-  // Gemini 不使用 section header 區分 Pinned，而是在每個釘選項目旁邊顯示釘子圖示。
-  // 策略：往上找 list item 容器，再在其中搜尋釘子相關線索。
+  // Gemini 把釘選圖示直接放在 <a> 內的 .trailing-icon-container：
+  //   pinned   → 含 <mat-icon data-mat-icon-name="push_pin">
+  //   unpinned → trailing-icon-container 為空
+  // 所以只要在 link 自身範圍內找 push_pin icon 即可，不需往上找 list item
+  // （往上找會誤抓 sibling 對話的「更多選項」選單裡的 Pin 動作圖示）。
   function isPinned(linkEl) {
-    // 向上最多走 8 層，找到最近的 list item 容器
-    let item = linkEl.parentElement;
-    for (let i = 0; i < 8; i++) {
-      if (!item) return false;
-      const tag = item.tagName?.toLowerCase() || '';
-      const role = item.getAttribute?.('role') || '';
-      if (tag === 'li' || tag === 'mat-list-item' || role === 'listitem' ||
-          item.classList?.toString().match(/\bconversation[-_]?item\b/i)) {
-        break;
-      }
-      item = item.parentElement;
-    }
-    if (!item) return false;
-
-    // Strategy 1: mat-icon 的文字內容（Angular Material 的 push_pin 圖示）
-    for (const icon of item.querySelectorAll('mat-icon')) {
-      const t = icon.textContent?.trim().toLowerCase();
-      if (t === 'push_pin' || t === 'keep') return true;
-    }
-
-    // Strategy 2: SVG data-mat-icon-name 屬性（Angular Material 的另一種寫法）
-    for (const el of item.querySelectorAll('[data-mat-icon-name]')) {
-      if (el.getAttribute('data-mat-icon-name') === 'push_pin') return true;
-    }
-
-    // Strategy 3: aria-label 含有 unpin / 取消釘選 等關鍵字（釘選項目才有「取消」選項）
-    const UNPIN_KEYWORDS = ['unpin', 'remove pin', '取消釘選', '取消固定', 'désépingler', 'lösen'];
-    for (const el of item.querySelectorAll('[aria-label], [title]')) {
-      const label = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
-      if (UNPIN_KEYWORDS.some(k => label.includes(k))) return true;
-    }
-
-    // Strategy 4: data-test-id 含有 pin（Gemini 的 E2E 測試 ID）
-    for (const el of item.querySelectorAll('[data-test-id]')) {
-      const id = el.getAttribute('data-test-id')?.toLowerCase() || '';
-      if (id.includes('pin') && !id.includes('unpin-false')) return true;
-    }
-
-    // Strategy 5: CSS class 含有 pinned（最後手段）
-    if (item.classList?.toString().toLowerCase().includes('pinned')) return true;
-    for (const el of item.querySelectorAll('[class]')) {
-      if (el.classList?.toString().toLowerCase().includes('pinned')) return true;
-    }
-
+    if (!linkEl) return false;
+    if (linkEl.querySelector('.trailing-icon-container [data-mat-icon-name="push_pin"]')) return true;
+    if (linkEl.querySelector('.trailing-icon-container [fonticon="push_pin"]')) return true;
     return false;
   }
 
