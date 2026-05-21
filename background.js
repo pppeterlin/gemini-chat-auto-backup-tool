@@ -101,8 +101,9 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
     target: { tabId },
     func: async (stopAtCount) => {
       // Expand any collapsed responses first
+      // v2: button uses data-test-id="luminous-expand-button"; older UI used aria-label
       document.querySelectorAll(
-        'button[aria-label="Expand"], button[aria-label="展開"]'
+        '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
       ).forEach(b => { try { b.click(); } catch (_) {} });
 
       const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -152,7 +153,12 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       }
 
       // ── Strategy B: Manual scroll fallback ──────────────────────────────────
+      // v2 (2026 redesign): #chat-history.chat-history-scroll-container is the outer
+      // scroller; infinite-scroller[data-test-id="chat-history-container"] is inside.
       const scrollEl = [
+        document.querySelector('#chat-history'),
+        document.querySelector('.chat-history-scroll-container'),
+        document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
         document.querySelector('.cdk-virtual-scroll-viewport'),
         document.querySelector('main'),
         document.querySelector('[data-scroll-container]'),
@@ -396,6 +402,11 @@ async function scrollSidebarToLoadAll(tabId) {
       // Find the sidebar scroll container (try several known selectors)
       function findSidebarEl() {
         const candidates = [
+          // v2 (2026 redesign)
+          document.querySelector('conversations-list[data-test-id="all-conversations"]'),
+          document.querySelector('[data-test-id="bard-sidenav-container"] infinite-scroller'),
+          document.querySelector('[data-test-id="bard-sidenav-container"]'),
+          // legacy
           document.querySelector('.conversations-list'),
           document.querySelector('mat-sidenav .conversations'),
           document.querySelector('[data-test-id="sidebar"] [cdkvirtualscrollviewport]'),
