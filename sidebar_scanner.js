@@ -27,6 +27,7 @@
   function extractTitle(el) {
     // 1. Prefer a child element that looks like a conversation-specific title
     for (const sel of [
+      '.title-text',                            // v2 (2026 redesign) — primary
       '[data-test-id="conversation-title"]',
       '.conversation-title',
       '.chat-title',
