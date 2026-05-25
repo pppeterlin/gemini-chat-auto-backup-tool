@@ -635,63 +635,50 @@ async function performFullHistoryBackup(limitCount = 0) {
     const tabId = tab.id;
     const originalUrl = tab.url;
 
-    // ── 等候 sidebar 展開（最多 30 秒 grace period）──────────────────────
+    // ── 主動展開 sidebar（若為 collapsed 狀態）────────────────────────────
     // Gemini 2026 改版後 sidebar 預設為 hover-to-expand (collapsed) 模式，
     // 此狀態下 gem-nav-list-item 全為空殼，無法掃描對話清單。
-    // 改變策略：不立即阻擋，而是給使用者 30 秒時間把滑鼠移到 sidebar 上展開，
-    // 偵測到展開後自動繼續。
-    const SIDEBAR_WAIT_MS = 30_000;
-    const SIDEBAR_POLL_MS = 500;
-    const sidebarDeadline = Date.now() + SIDEBAR_WAIT_MS;
-    let sidebarReady = false;
-    while (Date.now() < sidebarDeadline) {
-      try {
-        const [check] = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: () => {
-            const sn = document.querySelector('bard-sidenav');
-            const collapsed = sn?.classList?.contains('collapsed') || false;
-            const navItems = document.querySelectorAll('gem-nav-list-item[data-test-id="conversation"]').length;
-            const links = document.querySelectorAll('a[href*="/app/"]').length;
-            const ratio = navItems > 0 ? links / navItems : 1;
-            const mostlyEmpty = navItems >= 10 && ratio < 0.3;
-            return { collapsed, navItems, links, ratio, mostlyEmpty };
-          },
-        });
-        const c = check?.result;
-        if (c && !c.collapsed && !c.mostlyEmpty) {
-          sidebarReady = true;
-          break;
-        }
-        // 更新 currentTitle 顯示倒數提示，讓使用者開啟 popup 時知道在等
-        const remainSec = Math.ceil((sidebarDeadline - Date.now()) / 1000);
-        state.currentTitle = `⏳ 等候展開側邊欄（${remainSec}s）— 請把滑鼠移到左側圖示列`;
-        await saveState();
-      } catch (_) {}
+    // 實測 [data-test-id="side-nav-sparkle-button"] (aria-label="開啟側欄")
+    // 是真正的展開按鈕 — 程式化 click 即可展開並 render 完整對話清單。
+    try {
+      const [openResult] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async () => {
+          const wait = ms => new Promise(r => setTimeout(r, ms));
+          const sn = document.querySelector('bard-sidenav');
+          const wasCollapsed = sn?.classList?.contains('collapsed') || false;
 
-      // 停止偵測
-      const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
-      if (stopBackupRequested) {
-        await chrome.storage.local.remove('stopBackupRequested');
+          if (wasCollapsed) {
+            const openBtn = document.querySelector('[data-test-id="side-nav-sparkle-button"]');
+            if (openBtn) {
+              try { openBtn.click(); } catch (_) {}
+              // 等候 sidebar 展開、CDK virtual scroll 完成 render
+              for (let i = 0; i < 20; i++) {
+                await wait(250);
+                const links = document.querySelectorAll('a[href*="/app/"]').length;
+                if (links >= 5) break;
+              }
+            }
+          }
+
+          const navItems = document.querySelectorAll('gem-nav-list-item[data-test-id="conversation"]').length;
+          const links = document.querySelectorAll('a[href*="/app/"]').length;
+          const stillCollapsed = document.querySelector('bard-sidenav')?.classList?.contains('collapsed') || false;
+          const ratio = navItems > 0 ? links / navItems : 1;
+          const mostlyEmpty = navItems >= 10 && ratio < 0.3;
+          return { wasCollapsed, stillCollapsed, navItems, links, mostlyEmpty };
+        },
+      });
+      const r = openResult?.result;
+      if (r && (r.stillCollapsed || r.mostlyEmpty)) {
         state.inProgress = false;
-        state.stoppedByUser = true;
+        state.fatalError =
+          `無法展開對話側邊欄（共 ${r.navItems} 個項目，僅 ${r.links} 個已 render）。\n` +
+          `請手動點 Gemini 左上角的 ✨ Gemini 圖示展開側邊欄，看到完整對話清單後再執行全量備份。`;
         await saveState();
         return;
       }
-
-      await new Promise(r => setTimeout(r, SIDEBAR_POLL_MS));
-    }
-
-    if (!sidebarReady) {
-      state.inProgress = false;
-      state.currentTitle = '';
-      state.fatalError =
-        '等候 30 秒側邊欄仍未展開。請先把滑鼠移到 Gemini 左側圖示列展開側邊欄，' +
-        '看到完整對話清單後再執行全量備份。';
-      await saveState();
-      return;
-    }
-    state.currentTitle = '';
+    } catch (_) {} // 偵測本身失敗就 fallback 繼續，sidebar_scanner 結果若為空會被下方錯誤處理
 
     // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
     try {
