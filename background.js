@@ -100,14 +100,18 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
   await chrome.scripting.executeScript({
     target: { tabId },
     func: async (stopAtCount) => {
-      // Expand any collapsed responses first
-      // v2: button uses data-test-id="luminous-expand-button"; older UI used aria-label
-      document.querySelectorAll(
-        '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
-      ).forEach(b => { try { b.click(); } catch (_) {} });
+      // ── 設定 ─────────────────────────────────────────────────────────────────
+      const MAX_ITERATIONS = 80;          // 圈數上限（每圈約抓 10–20 則 → ~800–1600 則）
+      const WALL_TIMEOUT_MS = 5 * 60_000; // 整體上限 5 分鐘，避免無限卡住
+      const PROGRESS_TIMEOUT_MS = 12_000; // 每圈最多等 12 秒看是否有新內容
+      const POLL_INTERVAL_MS = 250;       // 每圈內部的輪詢間隔
+      const SPINNER_FINISH_WAIT_MS = 10_000; // 看到 spinner 後再等它消失的上限
+      const STABILITY_RETRIES = 2;        // 連續 N 圈無進度才視為「真的到頂了」
+      const RETRY_BACKOFF_MS = 1_500;     // 無進度後的等待，再做下一次嘗試
 
       const wait = ms => new Promise(r => setTimeout(r, ms));
 
+      // ── DOM 查找輔助 ─────────────────────────────────────────────────────────
       function countTurns() {
         return Math.max(
           document.querySelectorAll('user-query').length,
@@ -117,86 +121,134 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         );
       }
 
-      // ── Strategy A: Voyager timeline dots ───────────────────────────────────
-      const getFirstDot = () => document.querySelector('.timeline-dot[data-marker-index="0"]')
-                              || document.querySelector('.timeline-dot');
+      function findScrollEl() {
+        return [
+          document.querySelector('#chat-history'),
+          document.querySelector('.chat-history-scroll-container'),
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
+          document.querySelector('.cdk-virtual-scroll-viewport'),
+          document.querySelector('main'),
+          document.querySelector('[data-scroll-container]'),
+          document.scrollingElement,
+          document.documentElement,
+        ].find(el => el && el.scrollHeight > 0) || document.documentElement;
+      }
 
-      if (getFirstDot()) {
-        for (let attempt = 0; attempt < 30; attempt++) {
-          // 已載入足夠數量，提前停止
-          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
+      function getFirstDot() {
+        return document.querySelector('.timeline-dot[data-marker-index="0"]')
+            || document.querySelector('.timeline-dot');
+      }
 
-          const dot = getFirstDot();
-          if (!dot) break;
-
-          const prevCount = document.querySelectorAll('.timeline-dot').length;
-          dot.click(); // Jump to earliest loaded turn → Gemini fetches older history
-
-          // Wait up to 8 s for new dots to appear (new turns = new dots)
-          let newDotsFound = false;
-          for (let t = 0; t < 16; t++) {
-            await wait(500);
-            if (document.querySelectorAll('.timeline-dot').length > prevCount) {
-              newDotsFound = true;
-              break;
+      // Gemini 內建 spinner — 抓更早歷史時顯示。判斷實際可見而非僅在 DOM。
+      function isSpinnerVisible() {
+        const candidates = document.querySelectorAll(
+          '[data-test-id="loading-history-spinner"], .loading-history-spinner-container mat-progress-spinner, .loading-history-spinner-container mat-spinner'
+        );
+        for (const el of candidates) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            const cs = getComputedStyle(el);
+            if (cs.visibility !== 'hidden' && cs.display !== 'none' && parseFloat(cs.opacity || '1') > 0) {
+              return true;
             }
           }
-
-          if (!newDotsFound) break; // Dot count stable → full history loaded
         }
-
-        // Click the LAST dot to restore view to the most recent message
-        const dots = document.querySelectorAll('.timeline-dot');
-        if (dots.length) dots[dots.length - 1].click();
-        await wait(500);
-        return;
+        return false;
       }
 
-      // ── Strategy B: Manual scroll fallback ──────────────────────────────────
-      // v2 (2026 redesign): #chat-history.chat-history-scroll-container is the outer
-      // scroller; infinite-scroller[data-test-id="chat-history-container"] is inside.
-      const scrollEl = [
-        document.querySelector('#chat-history'),
-        document.querySelector('.chat-history-scroll-container'),
-        document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
-        document.querySelector('.cdk-virtual-scroll-viewport'),
-        document.querySelector('main'),
-        document.querySelector('[data-scroll-container]'),
-        document.scrollingElement,
-        document.documentElement,
-      ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
+      function expandAllCollapsed() {
+        document.querySelectorAll(
+          '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
+        ).forEach(b => { try { b.click(); } catch (_) {} });
+      }
 
-      // 已載入足夠數量，跳過捲動
+      // ── 主流程 ───────────────────────────────────────────────────────────────
+      const LOG_PREFIX = '[Gemini Backup]';
+      const log = (...a) => console.log(LOG_PREFIX, ...a);
+
+      expandAllCollapsed();
+
+      let scrollEl = findScrollEl();
+      const startTime = Date.now();
+      let consecutiveNoProgress = 0;
+      log(`history load start — initialCount=${countTurns()} stopAtCount=${stopAtCount}`);
+
+      // 已載入足夠數量，跳過所有捲動
       if (stopAtCount > 0 && countTurns() >= stopAtCount) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
+        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
         return;
       }
 
-      let prevTurnCount = countTurns();
+      for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+        if (Date.now() - startTime > WALL_TIMEOUT_MS) break;
 
-      for (let attempt = 0; attempt < 30; attempt++) {
-        scrollEl.scrollTop = 0;
+        scrollEl = findScrollEl();
+        const prevCount = countTurns();
+        const prevHeight = scrollEl?.scrollHeight || 0;
+
+        // 提前停止：已達目標數量
+        if (stopAtCount > 0 && prevCount >= stopAtCount) break;
+
+        // ── 雙觸發：同時點 Voyager 第一個 dot + 設 scrollTop=0 ──────────────
+        // dot.click()：Voyager 跳到最早 turn，Gemini 也會 fetch 更早歷史
+        // scrollTop=0：Gemini 自己的 infinite-scroller 也會被觸發
+        // 兩條路互補；任一條成功都會推進進度
+        const dot = getFirstDot();
+        if (dot) { try { dot.click(); } catch (_) {} }
+        if (scrollEl) scrollEl.scrollTop = 0;
         window.scrollTo(0, 0);
 
-        let newContentFound = false;
-        for (let t = 0; t < 16; t++) {
-          await wait(500);
+        // ── 等待新內容出現（任一訊號達成即算進度）──────────────────────
+        const deadline = Date.now() + PROGRESS_TIMEOUT_MS;
+        let progressed = false;
+        let sawSpinner = false;
+
+        while (Date.now() < deadline) {
+          await wait(POLL_INTERVAL_MS);
+          if (isSpinnerVisible()) sawSpinner = true;
+
+          // scrollEl 有可能在重 render 時被替換
+          scrollEl = findScrollEl();
           const curr = countTurns();
-          if (scrollEl.scrollTop > 0 || curr > prevTurnCount) {
-            prevTurnCount = Math.max(prevTurnCount, curr);
-            newContentFound = true;
+          const currHeight = scrollEl?.scrollHeight || 0;
+
+          if (curr > prevCount || currHeight > prevHeight + 50) {
+            progressed = true;
             break;
           }
         }
 
-        if (!newContentFound) break;
+        // 看到 spinner 就再等它消失（同一 chunk 全部 render 完才算數）
+        if (sawSpinner) {
+          const spinnerDeadline = Date.now() + SPINNER_FINISH_WAIT_MS;
+          while (Date.now() < spinnerDeadline && isSpinnerVisible()) {
+            await wait(POLL_INTERVAL_MS);
+          }
+        }
 
-        // 已載入足夠數量，提前停止往前捲動
-        if (stopAtCount > 0 && prevTurnCount >= stopAtCount) break;
+        // 新載入的訊息可能含 collapsed 區段 — 每圈都重新展開
+        expandAllCollapsed();
+
+        const currCount = countTurns();
+        log(`iter=${iter} count ${prevCount}→${currCount} progressed=${progressed} sawSpinner=${sawSpinner}`);
+
+        if (progressed) {
+          consecutiveNoProgress = 0;
+        } else {
+          consecutiveNoProgress++;
+          if (consecutiveNoProgress >= STABILITY_RETRIES) break; // 真的到頂
+          await wait(RETRY_BACKOFF_MS); // 給網路 / API 一點喘息再試一次
+        }
       }
 
-      // Restore to bottom
-      scrollEl.scrollTop = scrollEl.scrollHeight;
+      log(`history load done — finalCount=${countTurns()} elapsed=${Math.round((Date.now()-startTime)/1000)}s`);
+
+      // ── 收尾：捲回底部，恢復使用者視角 ──────────────────────────────────
+      scrollEl = findScrollEl();
+      if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+      // Voyager：點最後一個 dot 跳到最新訊息
+      const dots = document.querySelectorAll('.timeline-dot');
+      if (dots.length) { try { dots[dots.length - 1].click(); } catch (_) {} }
       window.scrollTo(0, document.body.scrollHeight);
       await wait(500);
     },
