@@ -122,16 +122,39 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       }
 
       function findScrollEl() {
-        return [
+        // 嚴格過濾：必須真正可 scroll（scrollHeight > clientHeight + 50）
+        // 並且 overflow-y 不能是 hidden（不然設 scrollTop 沒效果）
+        // 實測 #chat-history 與 .chat-history-scroll-container 都是 overflow:hidden,
+        // 只有 infinite-scroller[data-test-id="chat-history-container"] 真正可 scroll
+        const isScrollable = el => {
+          if (!el) return false;
+          if (el.scrollHeight <= el.clientHeight + 50) return false;
+          try {
+            const oy = getComputedStyle(el).overflowY;
+            return /(auto|scroll|overlay)/.test(oy);
+          } catch (_) { return true; }
+        };
+        const candidates = [
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
           document.querySelector('#chat-history'),
           document.querySelector('.chat-history-scroll-container'),
-          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
           document.querySelector('.cdk-virtual-scroll-viewport'),
           document.querySelector('main'),
           document.querySelector('[data-scroll-container]'),
-          document.scrollingElement,
-          document.documentElement,
-        ].find(el => el && el.scrollHeight > 0) || document.documentElement;
+        ];
+        for (const c of candidates) {
+          if (isScrollable(c)) return c;
+        }
+        // Fallback: 從首則訊息往上 walk 找最近可 scroll 祖先
+        const firstMsg = document.querySelector('user-query, model-response');
+        if (firstMsg) {
+          let el = firstMsg.parentElement;
+          while (el && el !== document.body) {
+            if (isScrollable(el)) return el;
+            el = el.parentElement;
+          }
+        }
+        return document.scrollingElement || document.documentElement;
       }
 
       function getFirstDot() {
