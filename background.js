@@ -202,13 +202,33 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         // 提前停止：已達目標數量
         if (stopAtCount > 0 && prevCount >= stopAtCount) break;
 
-        // ── 雙觸發：同時點 Voyager 第一個 dot + 設 scrollTop=0 ──────────────
-        // dot.click()：Voyager 跳到最早 turn，Gemini 也會 fetch 更早歷史
-        // scrollTop=0：Gemini 自己的 infinite-scroller 也會被觸發
-        // 兩條路互補；任一條成功都會推進進度
+        // ── 多重觸發：盡量讓 Gemini 抓更早歷史 ────────────────────────────
+        // 經實測，單純 scrollEl.scrollTop = 0 在某些容器上不會觸發 Gemini 的
+        // infinite-scroller listener（畫面有閃動但沒 fetch）。對所有候選
+        // 容器都觸發，並補上 scroll event dispatch 確保 listener 被叫到。
         const dot = getFirstDot();
         if (dot) { try { dot.click(); } catch (_) {} }
-        if (scrollEl) scrollEl.scrollTop = 0;
+
+        // 對所有可能的 scroll container 都試一次
+        const scrollTargets = [
+          document.querySelector('#chat-history'),
+          document.querySelector('.chat-history-scroll-container'),
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
+          document.querySelector('infinite-scroller'),
+          document.querySelector('.cdk-virtual-scroll-viewport'),
+          scrollEl,
+        ].filter(Boolean);
+        const seenTargets = new Set();
+        for (const t of scrollTargets) {
+          if (seenTargets.has(t)) continue;
+          seenTargets.add(t);
+          try {
+            t.scrollTop = 0;
+            // 主動派發 scroll event — 某些 listener 用 passive、不會被
+            // scrollTop assignment 自動觸發
+            t.dispatchEvent(new Event('scroll', { bubbles: true }));
+          } catch (_) {}
+        }
         window.scrollTo(0, 0);
 
         // ── 等待新內容出現（任一訊號達成即算進度）──────────────────────
@@ -615,37 +635,63 @@ async function performFullHistoryBackup(limitCount = 0) {
     const tabId = tab.id;
     const originalUrl = tab.url;
 
-    // ── 偵測 sidebar 是否為 collapsed 狀態 ─────────────────────────────────
-    // Gemini 2026 改版後 sidebar 預設可能為 hover-to-expand (collapsed) 模式。
-    // 此狀態下 gem-nav-list-item 全部為空殼（CDK virtual scroll 不 render），
-    // 無法掃描對話清單。必須由使用者手動展開（移到圖示列觸發 hover、或在
-    // Gemini 設定中關閉「自動收合」）。
-    try {
-      const [check] = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => {
-          // 用 tag selector 才能拿到真正帶 collapsed class 的 bard-sidenav 元素
-          // （而不是 bard-sidenav-container 等外層 wrapper）
-          const sn = document.querySelector('bard-sidenav');
-          const collapsed = sn?.classList?.contains('collapsed') || false;
-          const navItems = document.querySelectorAll('gem-nav-list-item[data-test-id="conversation"]').length;
-          const links = document.querySelectorAll('a[href*="/app/"]').length;
-          // 若 nav items 數量遠多於 link 數量 → 大部分項目是空殼（典型 collapsed 症狀）
-          const ratio = navItems > 0 ? links / navItems : 1;
-          const mostlyEmpty = navItems >= 10 && ratio < 0.3;
-          return { collapsed, navItems, links, ratio, mostlyEmpty };
-        },
-      });
-      const c = check?.result;
-      if (c && (c.collapsed || c.mostlyEmpty)) {
+    // ── 等候 sidebar 展開（最多 30 秒 grace period）──────────────────────
+    // Gemini 2026 改版後 sidebar 預設為 hover-to-expand (collapsed) 模式，
+    // 此狀態下 gem-nav-list-item 全為空殼，無法掃描對話清單。
+    // 改變策略：不立即阻擋，而是給使用者 30 秒時間把滑鼠移到 sidebar 上展開，
+    // 偵測到展開後自動繼續。
+    const SIDEBAR_WAIT_MS = 30_000;
+    const SIDEBAR_POLL_MS = 500;
+    const sidebarDeadline = Date.now() + SIDEBAR_WAIT_MS;
+    let sidebarReady = false;
+    while (Date.now() < sidebarDeadline) {
+      try {
+        const [check] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const sn = document.querySelector('bard-sidenav');
+            const collapsed = sn?.classList?.contains('collapsed') || false;
+            const navItems = document.querySelectorAll('gem-nav-list-item[data-test-id="conversation"]').length;
+            const links = document.querySelectorAll('a[href*="/app/"]').length;
+            const ratio = navItems > 0 ? links / navItems : 1;
+            const mostlyEmpty = navItems >= 10 && ratio < 0.3;
+            return { collapsed, navItems, links, ratio, mostlyEmpty };
+          },
+        });
+        const c = check?.result;
+        if (c && !c.collapsed && !c.mostlyEmpty) {
+          sidebarReady = true;
+          break;
+        }
+        // 更新 currentTitle 顯示倒數提示，讓使用者開啟 popup 時知道在等
+        const remainSec = Math.ceil((sidebarDeadline - Date.now()) / 1000);
+        state.currentTitle = `⏳ 等候展開側邊欄（${remainSec}s）— 請把滑鼠移到左側圖示列`;
+        await saveState();
+      } catch (_) {}
+
+      // 停止偵測
+      const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
+      if (stopBackupRequested) {
+        await chrome.storage.local.remove('stopBackupRequested');
         state.inProgress = false;
-        state.fatalError =
-          `偵測到對話側邊欄為收合狀態，無法掃描對話清單（共 ${c.navItems} 個項目但僅 ${c.links} 個已 render）。\n` +
-          `請先在 Gemini 中展開側邊欄（將滑鼠移到左側圖示列、或在設定中關閉自動收合），再重新執行全量備份。`;
+        state.stoppedByUser = true;
         await saveState();
         return;
       }
-    } catch (_) {} // 偵測本身失敗就 fallback 繼續執行
+
+      await new Promise(r => setTimeout(r, SIDEBAR_POLL_MS));
+    }
+
+    if (!sidebarReady) {
+      state.inProgress = false;
+      state.currentTitle = '';
+      state.fatalError =
+        '等候 30 秒側邊欄仍未展開。請先把滑鼠移到 Gemini 左側圖示列展開側邊欄，' +
+        '看到完整對話清單後再執行全量備份。';
+      await saveState();
+      return;
+    }
+    state.currentTitle = '';
 
     // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
     try {
