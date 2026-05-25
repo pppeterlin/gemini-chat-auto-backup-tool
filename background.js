@@ -505,36 +505,56 @@ async function scrollSidebarToLoadAll(tabId) {
     func: async () => {
       const wait = ms => new Promise(r => setTimeout(r, ms));
 
-      // Find the sidebar scroll container (try several known selectors)
-      function findSidebarEl() {
-        const candidates = [
-          // v2 (2026 redesign)
-          document.querySelector('conversations-list[data-test-id="all-conversations"]'),
-          document.querySelector('[data-test-id="bard-sidenav-container"] infinite-scroller'),
-          document.querySelector('[data-test-id="bard-sidenav-container"]'),
-          // legacy
-          document.querySelector('.conversations-list'),
-          document.querySelector('mat-sidenav .conversations'),
-          document.querySelector('[data-test-id="sidebar"] [cdkvirtualscrollviewport]'),
-          document.querySelector('infinite-scroller'),
-          document.querySelector('.conversation-list'),
-          document.querySelector('nav'),
-          // Broadest fallback: leftmost tall scrollable element
-          ...Array.from(document.querySelectorAll('*')).filter(el => {
-            const r = el.getBoundingClientRect();
-            return r.left < 300 && r.height > 400 && el.scrollHeight > el.clientHeight + 100;
-          }),
-        ].filter(Boolean);
-        return candidates[0] || null;
+      // Find the sidebar's TRULY scrollable container.
+      // v2 (2026 redesign) 重要修正：conversations-list 的 scrollHeight == clientHeight，
+      // 不能 scroll！真正可 scroll 的是包在 sidebar 內、不同於 chat-history 的另一個
+      // <infinite-scroller>。要靠 scrollHeight > clientHeight + 50 + 排除 chat 區
+      // 來區分。
+      function findSidebarScrollEl() {
+        const isScrollable = el => {
+          if (!el) return false;
+          if (el.scrollHeight <= el.clientHeight + 50) return false;
+          try {
+            const oy = getComputedStyle(el).overflowY;
+            return /(auto|scroll|overlay)/.test(oy);
+          } catch (_) { return true; }
+        };
+        // 候選：先 sidebar root 範圍內找 <infinite-scroller>
+        const root = document.querySelector('bard-sidenav, [data-test-id="bard-sidenav-container"]');
+        if (root) {
+          const innerIS = root.querySelector('infinite-scroller');
+          if (isScrollable(innerIS)) return innerIS;
+        }
+        // 從第一個對話連結往上走，找最近的可 scroll 祖先（最可靠的 fallback）
+        const firstLink = document.querySelector('a[href*="/app/"]');
+        if (firstLink) {
+          let el = firstLink.parentElement;
+          while (el && el !== document.body) {
+            if (isScrollable(el)) return el;
+            el = el.parentElement;
+          }
+        }
+        // legacy fallbacks
+        for (const sel of ['.cdk-virtual-scroll-viewport', 'mat-sidenav .conversations', '.conversations-list', '.conversation-list']) {
+          const el = document.querySelector(sel);
+          if (isScrollable(el)) return el;
+        }
+        return null;
       }
 
-      const sidebarEl = findSidebarEl();
-      if (!sidebarEl) return; // Can't find sidebar — give up gracefully
+      const sidebarEl = findSidebarScrollEl();
+      if (!sidebarEl) {
+        // 找不到可 scroll 的容器 — 可能 sidebar 結構已變，或對話本來就少不需 scroll
+        // 不算錯誤，後續 scanner 仍會掃描已 render 的對話
+        return;
+      }
 
       let prevCount = document.querySelectorAll('a[href*="/app/"]').length;
 
       for (let attempt = 0; attempt < 30; attempt++) {
         sidebarEl.scrollTop = sidebarEl.scrollHeight;
+        // 主動派發 scroll 事件 — 某些 listener 是 passive 不會自動觸發
+        try { sidebarEl.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
         await wait(1200);
 
         const newCount = document.querySelectorAll('a[href*="/app/"]').length;
