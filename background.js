@@ -157,9 +157,17 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       }
 
       function expandAllCollapsed() {
+        // 訊息展開鈕（aria-label="展開" / "Expand"）— 但 sidebar 的
+        // [data-test-id="luminous-expand-button"] 也有相同 aria-label，
+        // 點到會干擾側邊欄狀態，必須排除。
         document.querySelectorAll(
-          '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
-        ).forEach(b => { try { b.click(); } catch (_) {} });
+          'button[aria-label="Expand"], button[aria-label="展開"]'
+        ).forEach(b => {
+          // 排除 sidebar 相關按鈕
+          if (b.getAttribute('data-test-id') === 'luminous-expand-button') return;
+          if (b.closest('bard-sidenav, [data-test-id="bard-sidenav-container"]')) return;
+          try { b.click(); } catch (_) {}
+        });
       }
 
       // ── 主流程 ───────────────────────────────────────────────────────────────
@@ -606,6 +614,38 @@ async function performFullHistoryBackup(limitCount = 0) {
     const tab = tabs[0];
     const tabId = tab.id;
     const originalUrl = tab.url;
+
+    // ── 偵測 sidebar 是否為 collapsed 狀態 ─────────────────────────────────
+    // Gemini 2026 改版後 sidebar 預設可能為 hover-to-expand (collapsed) 模式。
+    // 此狀態下 gem-nav-list-item 全部為空殼（CDK virtual scroll 不 render），
+    // 無法掃描對話清單。必須由使用者手動展開（移到圖示列觸發 hover、或在
+    // Gemini 設定中關閉「自動收合」）。
+    try {
+      const [check] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // 用 tag selector 才能拿到真正帶 collapsed class 的 bard-sidenav 元素
+          // （而不是 bard-sidenav-container 等外層 wrapper）
+          const sn = document.querySelector('bard-sidenav');
+          const collapsed = sn?.classList?.contains('collapsed') || false;
+          const navItems = document.querySelectorAll('gem-nav-list-item[data-test-id="conversation"]').length;
+          const links = document.querySelectorAll('a[href*="/app/"]').length;
+          // 若 nav items 數量遠多於 link 數量 → 大部分項目是空殼（典型 collapsed 症狀）
+          const ratio = navItems > 0 ? links / navItems : 1;
+          const mostlyEmpty = navItems >= 10 && ratio < 0.3;
+          return { collapsed, navItems, links, ratio, mostlyEmpty };
+        },
+      });
+      const c = check?.result;
+      if (c && (c.collapsed || c.mostlyEmpty)) {
+        state.inProgress = false;
+        state.fatalError =
+          `偵測到對話側邊欄為收合狀態，無法掃描對話清單（共 ${c.navItems} 個項目但僅 ${c.links} 個已 render）。\n` +
+          `請先在 Gemini 中展開側邊欄（將滑鼠移到左側圖示列、或在設定中關閉自動收合），再重新執行全量備份。`;
+        await saveState();
+        return;
+      }
+    } catch (_) {} // 偵測本身失敗就 fallback 繼續執行
 
     // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
     try {
