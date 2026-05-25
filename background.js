@@ -523,11 +523,37 @@ async function scrollSidebarToLoadAll(tabId) {
 
 // ── Full history backup ────────────────────────────────────────────────────────
 
+// 清除上一次備份留下的殘留狀態（stop flag、page-side abort flag）
+// 避免「按停止後重新備份」時舊狀態誤殺新作業
+async function clearStaleAbortState() {
+  // 1. 清除 storage 的 stop flag
+  await chrome.storage.local.remove('stopBackupRequested');
+
+  // 2. 重設所有 Gemini 分頁的 page-side abort flag
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    await Promise.all((tabs || []).map(t =>
+      chrome.scripting.executeScript({
+        target: { tabId: t.id },
+        func: () => { window.__geminiBackupAborted = false; },
+      }).catch(() => {})
+    ));
+  } catch (_) {}
+}
+
 // limitCount: 0 = 全部；> 0 = 僅備份非 Pinned 的前 N 個（Pinned 永遠全備份）
 async function performFullHistoryBackup(limitCount = 0) {
   // Prevent duplicate runs
   const { fullBackupState: running } = await chrome.storage.local.get('fullBackupState');
   if (running?.inProgress) return;
+
+  // 啟動新一輪全量備份 — 無條件清除前次殘留狀態：
+  // - stopBackupRequested (storage flag)
+  // - window.__geminiBackupAborted (page flag) on all Gemini tabs
+  // - 整份舊的 fullBackupState（包含 failed/pending 紀錄）
+  // 這樣前次「按停止」或「失敗中斷」的殘留不會影響本次掃描與處理
+  await clearStaleAbortState();
+  await chrome.storage.local.remove('fullBackupState');
 
   const state = {
     inProgress: true,
@@ -820,6 +846,9 @@ async function performRetryFailedBackup() {
       ? { ...c, status: 'pending', reason: null }
       : c
   );
+
+  // 啟動重試前清除殘留 stop / abort 狀態（與全量備份對齊）
+  await clearStaleAbortState();
 
   const state = {
     ...currentState,
