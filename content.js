@@ -337,9 +337,16 @@
     'image/webp': 'webp', 'image/avif': 'avif',
   };
 
+  // 使用者按下「停止」會在 window.__geminiBackupAborted 設旗標 — 任何長迴圈
+  // 都應該檢查並提早返回 null，讓背景判斷為「失敗」並終止整個流程。
+  const isAborted = () => !!window.__geminiBackupAborted;
+
   // Phase 1: 循序點擊燈箱，收集每張圖的最終 fetchUrl
   const downloadQueue = []; // { img, fetchUrl }
   for (const img of imageList) {
+    if (isAborted()) {
+      return { title, content: null, hash: '', url: conversationUrl, aborted: true };
+    }
     let fetchUrl = img.src;
     if (img.buttonEl) {
       const info = await openLightboxAndGetInfo(img.buttonEl);
@@ -356,11 +363,21 @@
     downloadQueue.push({ img, fetchUrl });
   }
 
+  if (isAborted()) {
+    return { title, content: null, hash: '', url: conversationUrl, aborted: true };
+  }
+
   // Phase 2: 並行 fetch — 所有圖片同時下載
+  // 用 AbortController 串起來，使用者按停止會立即中止所有 in-flight fetch
+  const fetchAborter = new AbortController();
+  const abortPoll = setInterval(() => {
+    if (isAborted()) { fetchAborter.abort(); clearInterval(abortPoll); }
+  }, 200);
+
   const fetchedImages = (await Promise.all(
     downloadQueue.map(async ({ img, fetchUrl }) => {
       try {
-        const resp = await fetch(fetchUrl, { credentials: 'include' });
+        const resp = await fetch(fetchUrl, { credentials: 'include', signal: fetchAborter.signal });
         if (!resp.ok) return null;
         const blob = await resp.blob();
         if (blob.size > MAX_IMAGE_BYTES) return null;
@@ -381,10 +398,16 @@
         });
         return { filename: img.filename, dataUrl };
       } catch (_) {
-        return null; // 下載失敗：markdown 保留佔位，但不存檔
+        return null; // 下載失敗或被 abort：markdown 保留佔位，但不存檔
       }
     })
   )).filter(Boolean);
+  clearInterval(abortPoll);
+
+  // Phase 2 結束後再做一次 abort 確認 — 如果被中斷就回報給背景
+  if (isAborted()) {
+    return { title, content: null, hash: '', url: conversationUrl, aborted: true };
+  }
 
   return {
     title,

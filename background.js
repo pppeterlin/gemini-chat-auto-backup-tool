@@ -165,6 +165,10 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       // ── 主流程 ───────────────────────────────────────────────────────────────
       const LOG_PREFIX = '[Gemini Backup]';
       const log = (...a) => console.log(LOG_PREFIX, ...a);
+      const isAborted = () => !!window.__geminiBackupAborted;
+
+      // 進入新一輪 — 清掉上一次的 abort flag（避免殘留誤殺）
+      window.__geminiBackupAborted = false;
 
       expandAllCollapsed();
 
@@ -180,6 +184,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       }
 
       for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+        if (isAborted()) { log('aborted by user'); return; }
         if (Date.now() - startTime > WALL_TIMEOUT_MS) break;
 
         scrollEl = findScrollEl();
@@ -205,6 +210,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
 
         while (Date.now() < deadline) {
           await wait(POLL_INTERVAL_MS);
+          if (isAborted()) { log('aborted by user'); return; }
           if (isSpinnerVisible()) sawSpinner = true;
 
           // scrollEl 有可能在重 render 時被替換
@@ -223,6 +229,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
           const spinnerDeadline = Date.now() + SPINNER_FINISH_WAIT_MS;
           while (Date.now() < spinnerDeadline && isSpinnerVisible()) {
             await wait(POLL_INTERVAL_MS);
+            if (isAborted()) { log('aborted by user'); return; }
           }
         }
 
@@ -238,6 +245,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
           consecutiveNoProgress++;
           if (consecutiveNoProgress >= STABILITY_RETRIES) break; // 真的到頂
           await wait(RETRY_BACKOFF_MS); // 給網路 / API 一點喘息再試一次
+          if (isAborted()) { log('aborted by user'); return; }
         }
       }
 
@@ -259,10 +267,28 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
 // Navigate a tab to url and wait for it to finish loading
 function navigateAndWait(tabId, url, extraWaitMs = 2500) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(stopPoll);
       chrome.tabs.onUpdated.removeListener(onUpdated);
-      reject(new Error('頁面載入逾時（30 秒）'));
-    }, 30000);
+      fn(arg);
+    };
+
+    const timeout = setTimeout(
+      () => settle(reject, new Error('頁面載入逾時（30 秒）')),
+      30000
+    );
+
+    // 停止偵測：使用者按下「停止」時提早中斷 navigation 等待
+    const stopPoll = setInterval(async () => {
+      try {
+        const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
+        if (stopBackupRequested) settle(reject, new Error('使用者已取消備份'));
+      } catch (_) {}
+    }, 300);
 
     let hasStartedLoading = false;
 
@@ -270,10 +296,10 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
       if (id !== tabId) return;
       if (info.status === 'loading') hasStartedLoading = true;
       if (hasStartedLoading && info.status === 'complete') {
-        clearTimeout(timeout);
         chrome.tabs.onUpdated.removeListener(onUpdated);
         // Extra wait for dynamic content to render (±30% jitter to look more human)
-        setTimeout(resolve, extraWaitMs * (0.7 + Math.random() * 0.6));
+        const extraDelay = extraWaitMs * (0.7 + Math.random() * 0.6);
+        setTimeout(() => settle(resolve), extraDelay);
       }
     }
 
@@ -689,7 +715,16 @@ async function performFullHistoryBackup(limitCount = 0) {
           files: ['content.js'],
         });
 
+        // ── Stop check #5：content.js 執行完後立即確認（圖片下載可能耗時 10+ 秒）──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
+
         const data = results?.[0]?.result;
+        if (data?.aborted) {
+          // content.js 自己偵測到 abort flag — 直接停止整個流程
+          await handleStop();
+          return;
+        }
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
@@ -880,7 +915,16 @@ async function performRetryFailedBackup() {
           files: ['content.js'],
         });
 
+        // ── Stop check #5：content.js 執行完後立即確認（圖片下載可能耗時 10+ 秒）──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
+
         const data = results?.[0]?.result;
+        if (data?.aborted) {
+          // content.js 自己偵測到 abort flag — 直接停止整個流程
+          await handleStop();
+          return;
+        }
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
@@ -972,6 +1016,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.action === 'stopFullBackup') {
     chrome.storage.local.set({ stopBackupRequested: true });
+    // 對所有 Gemini 分頁注入 abort flag — 長迴圈 (scrollToLoadAllMessages /
+    // content.js 圖片下載) 每次輪詢都會檢查它，立即跳出
+    chrome.tabs.query({ url: 'https://gemini.google.com/*' }, (tabs) => {
+      for (const t of tabs || []) {
+        chrome.scripting.executeScript({
+          target: { tabId: t.id },
+          func: () => { window.__geminiBackupAborted = true; },
+        }).catch(() => {});
+      }
+    });
     sendResponse({ ok: true });
     return true;
   }
