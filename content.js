@@ -231,22 +231,27 @@
 
   // ── 擷取對話標題 ──────────────────────────────────────────────────────────────
   function getTitle() {
+    // v2 (2026 redesign): no global title element — derive from the active sidebar item
+    for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
+      if (el.getAttribute('aria-current') === 'page' ||
+          el.getAttribute('aria-selected') === 'true' ||
+          el.classList?.contains('is-active')) {
+        const titleSpan = el.querySelector?.('.title-text, .gv-conversation-title');
+        const spanText = titleSpan?.textContent?.trim();
+        if (spanText && spanText.length >= 1 && spanText.length <= 200) return spanText;
+        const ariaLabel = el.getAttribute('aria-label')?.trim();
+        if (ariaLabel && ariaLabel.length >= 1 && ariaLabel.length <= 200) return ariaLabel;
+        const text = el.textContent?.trim();
+        if (text && text.length >= 1 && text.length <= 120) return text;
+      }
+    }
+
+    // Legacy fallback (pre-v2 UI)
     const testIdEl = document.querySelector('[data-test-id="conversation-title"]');
     if (testIdEl?.textContent?.trim()) return testIdEl.textContent.trim();
-
     for (const sel of ['.conversation-title', '[data-conversation-title]', '.chat-title']) {
       const el = queryShadowAll(document, sel)[0];
       if (el?.textContent?.trim()) return el.textContent.trim();
-    }
-
-    for (const el of queryShadowAll(document, 'a[href*="/app/"]')) {
-      if (el.getAttribute('aria-current') === 'page' ||
-          el.getAttribute('aria-selected') === 'true') {
-        const ariaLabel = el.getAttribute('aria-label')?.trim();
-        if (ariaLabel && ariaLabel.length >= 2 && ariaLabel.length <= 200) return ariaLabel;
-        const text = el.textContent?.trim();
-        if (text && text.length >= 2 && text.length <= 120) return text;
-      }
     }
 
     return document.title.replace(/\s*[-|]\s*Gemini\s*$/i, '').trim() || '未命名對話';
