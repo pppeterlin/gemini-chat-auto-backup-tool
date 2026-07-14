@@ -473,6 +473,15 @@
   // ── 主邏輯 ─────────────────────────────────────────────────────────────────────
   const title = getTitle();
   const conversationUrl = window.location.href;
+
+  // 使用者按下「停止」時 background 會在 window.__geminiBackupAborted 設旗標。
+  // 長迴圈（訊息擷取、燈箱、圖片下載）每輪都檢查，偵測到就回報 aborted，
+  // 由 background 立即終止整個備份流程。
+  const isAborted = () => !!window.__geminiBackupAborted;
+  const abortedResult = () => (
+    { title, content: null, hash: '', url: conversationUrl, aborted: true }
+  );
+
   const { userEls, modelEls } = findMessages();
 
   if (!userEls.length && !modelEls.length) {
@@ -489,6 +498,7 @@
   const maxLen = Math.max(userEls.length, modelEls.length);
   try {
     for (let i = 0; i < maxLen; i++) {
+      if (isAborted()) return abortedResult();
       if (i < userEls.length) {
         const userMd = cleanUserMd(htmlToMarkdown(userEls[i]));
         messages.push({ role: 'user', markdown: userMd });
@@ -539,6 +549,7 @@
   // Phase 1: 循序點擊燈箱，收集每張圖的最終 fetchUrl
   const downloadQueue = []; // { img, fetchUrl }
   for (const img of imageList) {
+    if (isAborted()) return abortedResult();
     let fetchUrl = img.src;
     if (img.buttonEl) {
       const info = await openLightboxAndGetInfo(img.buttonEl);
@@ -555,11 +566,19 @@
     downloadQueue.push({ img, fetchUrl });
   }
 
+  if (isAborted()) return abortedResult();
+
   // Phase 2: 並行 fetch — 所有圖片同時下載
+  // AbortController 串接：使用者按停止會立即中止所有 in-flight fetch
+  const fetchAborter = new AbortController();
+  const abortPoll = setInterval(() => {
+    if (isAborted()) { fetchAborter.abort(); clearInterval(abortPoll); }
+  }, 200);
+
   const fetchedImages = (await Promise.all(
     downloadQueue.map(async ({ img, fetchUrl }) => {
       try {
-        const resp = await fetch(fetchUrl, { credentials: 'include' });
+        const resp = await fetch(fetchUrl, { credentials: 'include', signal: fetchAborter.signal });
         if (!resp.ok) return null;
         const blob = await resp.blob();
         if (blob.size > MAX_IMAGE_BYTES) return null;
@@ -580,10 +599,14 @@
         });
         return { filename: img.filename, dataUrl };
       } catch (_) {
-        return null; // 下載失敗：markdown 保留佔位，但不存檔
+        return null; // 下載失敗或被 abort：markdown 保留佔位，但不存檔
       }
     })
   )).filter(Boolean);
+  clearInterval(abortPoll);
+
+  // Phase 2 結束後再確認一次 — 被中斷就回報給 background
+  if (isAborted()) return abortedResult();
 
   // ── 穩定 hash 與檔內 meta 註記 ─────────────────────────────────────────────────
   // meta 註記寫在檔尾，讓 background.js 之後可以直接從備份資料夾重建索引

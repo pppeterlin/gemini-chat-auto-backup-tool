@@ -147,6 +147,28 @@ $JSC test/run_tests.js
 
 ## Changelog
 
+### v2.2.2 — 2026-07-14
+
+移植自 PR #12（基於舊架構的改良，經重新實作至 v2.2.1 新架構）：
+
+#### 停止備份立即生效
+- 按下「停止備份」後 **< 500ms 內終止所有作業**（原本要等當前對話的長作業跑完）：
+  - stop 時廣播 abort 旗標到所有 Gemini 分頁，頁面內長迴圈（歷史捲動、圖片下載、官方複製擷取）每輪輪詢都會檢查並立即跳出
+  - 導航等待加入停止偵測（每 300ms），按停止立即中斷且不觸發導航重試
+  - 圖片並行下載改用 `AbortController`，停止時中止所有 in-flight fetch
+  - 新一輪備份開始時自動清除前次殘留的 stop / abort 旗標，避免誤殺
+
+#### 歷史載入強化（實測修正）
+- **真實可捲動性判斷**：實測 `#chat-history` 等容器為 `overflow:hidden`（設 scrollTop 無效），改以 `overflow-y` + `scrollHeight` 判斷真正可捲的容器，並支援從訊息元素向上查找可捲祖先
+- **多容器觸發 + scroll 事件派發**：對所有候選容器捲頂並主動派發 scroll 事件（部分 listener 為 passive，不會被 scrollTop assignment 觸發）
+- **spinner 訊號**：偵測 Gemini 內建的 `loading-history-spinner`，看到就等它消失再判定進度，timing 更準確
+- **展開鈕修正**：`luminous-expand-button` 實為側邊欄按鈕（aria-label 同為「展開」），已從訊息展開清單排除；每圈重新展開新載入的 collapsed 區段
+- **上限放寬**：80 圈 + 5 分鐘 wall-clock 雙保險，支援 800+ 則的超長對話；連續 2 圈無進度（中間 backoff 重試）才收工
+
+#### 側邊欄
+- **collapsed 自動展開**：Gemini 2026 改版後側邊欄預設 hover-to-expand，collapsed 時對話項目為空殼無法掃描；全量備份會自動點擊展開按鈕，失敗時給出明確指引而非默默漏備份
+- 側邊欄捲動同樣改用真實可捲動性判斷 + scroll 事件派發
+
 ### v2.2.1 — 2026-07-14
 
 #### 重大修正
