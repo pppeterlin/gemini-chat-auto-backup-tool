@@ -74,7 +74,12 @@ function htmlToMarkdown(rootEl) {
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = node.tagName.toLowerCase();
     if (node.style && node.style.display === 'none') return '';
-    if (['script', 'style', 'button', 'svg', 'noscript'].includes(tag)) return '';
+    if ([
+      'script', 'style', 'button', 'svg', 'noscript', 'mat-icon',
+      'model-thoughts', 'source-footnote', 'sources-carousel',
+      'sources-carousel-inline', 'source-inline-chip', 'tts-control',
+      'message-actions', 'sensitive-memories-banner',
+    ].includes(tag)) return '';
     const inner = () => Array.from(node.childNodes).map(convert).join('');
     switch (tag) {
       case 'h1': return `\n# ${inner().trim()}\n`;
@@ -83,6 +88,7 @@ function htmlToMarkdown(rootEl) {
       case 'h4': case 'h5': case 'h6': return `\n#### ${inner().trim()}\n`;
       case 'strong': case 'b': { const t = inner().trim(); return t ? `**${t}**` : ''; }
       case 'em': case 'i': { const t = inner().trim(); return t ? `*${t}*` : ''; }
+      case 'del': case 's': case 'strike': { const t = inner().trim(); return t ? `~~${t}~~` : ''; }
       case 'p': return `\n${inner()}\n`;
       case 'br': return '\n';
       case 'hr': return '\n---\n';
@@ -98,12 +104,12 @@ function htmlToMarkdown(rootEl) {
       }
       case 'ul': {
         const items = Array.from(node.children).filter(c => c.tagName === 'LI')
-          .map(li => `- ${convert(li).trim()}`).join('\n');
+          .map(li => renderListItem(li, '- ')).join('\n');
         return `\n${items}\n`;
       }
       case 'ol': {
         const items = Array.from(node.children).filter(c => c.tagName === 'LI')
-          .map((li, i) => `${i + 1}. ${convert(li).trim()}`).join('\n');
+          .map((li, i) => renderListItem(li, `${i + 1}. `)).join('\n');
         return `\n${items}\n`;
       }
       case 'li': return inner();
@@ -116,6 +122,14 @@ function htmlToMarkdown(rootEl) {
       case 'blockquote': return `\n> ${inner().trim().replace(/\n/g, '\n> ')}\n`;
       default: return inner();
     }
+  }
+  // 巢狀清單：li 內含子清單時，第一行掛清單標記，其餘行縮排兩格
+  function renderListItem(li, marker) {
+    const lines = convert(li).trim().split('\n');
+    const first = `${marker}${lines[0]}`;
+    if (lines.length === 1) return first;
+    const rest = lines.slice(1).map(l => (l ? `  ${l}` : l)).join('\n');
+    return `${first}\n${rest}`;
   }
   return convert(rootEl).replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -139,6 +153,31 @@ function formatTimestamp(date) {
 
 function sanitizeFilename(title) {
   return title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
+}
+
+// 穩定內容雜湊（同 content.js）：只根據訊息本文計算，不含備份時間戳
+function stableContentHash(messages) {
+  return simpleHash(messages.map(m => `${m.role} ${m.markdown}`).join(''));
+}
+
+// 備份檔尾 meta 註記解析（同 background.js）
+function parseBackupMeta(mdText) {
+  const m = (mdText || '').match(
+    /<!--\s*gemini-backup:v1\s+hash=([0-9a-f]+)\s+msgs=(\d+)(?:\s+id=([a-zA-Z0-9_-]*))?\s*-->/
+  );
+  if (!m) return null;
+  return { hash: m[1], msgs: parseInt(m[2], 10) || 0, id: m[3] || '' };
+}
+
+// 對話 ID 擷取（同 background.js / sidebar_scanner.js）
+function extractChatId(url) {
+  const match = (url || '').match(/\/app\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+function extractChatIdFromJslog(value) {
+  const match = String(value || '').match(/\bc_([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -308,6 +347,100 @@ const samples = [
 const hashes = samples.map(s => simpleHash(s));
 const unique = new Set(hashes);
 test(`${samples.length} 個不同樣本產生 ${unique.size} 個不同雜湊`, () => unique.size === samples.length);
+
+// ── Test 7: 新增格式（刪除線 / 巢狀清單 / UI 元件忽略）──────────────────────────
+print('\n【T7】新增格式轉換');
+
+const del = createEl('del'); del.childNodes.push(createText('gone')); del.textContent = 'gone';
+assertEqual('刪除線 <del>', htmlToMarkdown(del), '~~gone~~');
+
+const s = createEl('s'); s.childNodes.push(createText('old')); s.textContent = 'old';
+assertEqual('刪除線 <s>', htmlToMarkdown(s), '~~old~~');
+
+// 巢狀清單：ul > li('A' + ul > li('B1'))
+const nestedInner = createEl('ul');
+const bLi = createEl('li'); bLi.childNodes.push(createText('B1')); bLi.textContent = 'B1';
+nestedInner.appendChild(bLi);
+const outerLi = createEl('li');
+outerLi.childNodes.push(createText('A'));
+outerLi.childNodes.push(nestedInner);
+outerLi.textContent = 'A';
+const outerUl = createEl('ul');
+outerUl.appendChild(outerLi);
+const nestedMd = htmlToMarkdown(outerUl);
+assertContains('巢狀清單外層', nestedMd, '- A');
+assertContains('巢狀清單內層縮排', nestedMd, '  - B1');
+
+const thoughts = createEl('model-thoughts');
+thoughts.childNodes.push(createText('內部思考過程'));
+thoughts.textContent = '內部思考過程';
+assertEqual('思考過程 model-thoughts 忽略', htmlToMarkdown(thoughts), '');
+
+const icon = createEl('mat-icon');
+icon.childNodes.push(createText('edit'));
+icon.textContent = 'edit';
+assertEqual('mat-icon 忽略', htmlToMarkdown(icon), '');
+
+// ── Test 8: 穩定內容雜湊（增量判斷核心）─────────────────────────────────────────
+print('\n【T8】穩定內容雜湊');
+
+const msgsA = [
+  { role: 'user', markdown: '你好' },
+  { role: 'model', markdown: '你好！有什麼需要幫忙？' },
+];
+const msgsB = [
+  { role: 'user', markdown: '你好' },
+  { role: 'model', markdown: '你好！有什麼需要幫忙？' },
+];
+const msgsC = [
+  ...msgsA,
+  { role: 'user', markdown: '再問一個問題' },
+];
+
+test('相同訊息（不同時間備份）→ 相同雜湊', () =>
+  stableContentHash(msgsA) === stableContentHash(msgsB));
+test('新增訊息 → 雜湊改變', () =>
+  stableContentHash(msgsA) !== stableContentHash(msgsC));
+test('角色不同 → 雜湊不同', () =>
+  stableContentHash([{ role: 'user', markdown: 'x' }]) !==
+  stableContentHash([{ role: 'model', markdown: 'x' }]));
+test('空訊息清單不崩潰', () => typeof stableContentHash([]) === 'string');
+
+// ── Test 9: 備份檔 meta 註記 ────────────────────────────────────────────────────
+print('\n【T9】meta 註記解析（本地索引重建）');
+
+const sampleHash = stableContentHash(msgsA);
+const metaLine = `<!-- gemini-backup:v1 hash=${sampleHash} msgs=2 id=abc123DEF -->`;
+const sampleMd = `# 標題\n\n## 使用者\n\n你好\n\n## Gemini\n\n哈囉\n\n${metaLine}\n`;
+
+const parsed = parseBackupMeta(sampleMd);
+test('解析成功', () => parsed !== null);
+assertEqual('hash 正確', parsed?.hash, sampleHash);
+assertEqual('msgs 正確', parsed?.msgs, 2);
+assertEqual('id 正確', parsed?.id, 'abc123DEF');
+test('無 meta 註記回傳 null', () => parseBackupMeta('# 只有標題\n\n內文') === null);
+test('meta 損毀回傳 null', () => parseBackupMeta('<!-- gemini-backup:v1 hash= -->') === null);
+
+// 舊格式檔案（無 meta）：以段落標題推回訊息數
+const legacyMd = '# 舊備份\n\n## 使用者\n\n嗨\n\n## Gemini\n\n嗨！\n\n## 使用者\n\n再見\n';
+const headingCount = (legacyMd.match(/^## (使用者|Gemini)$/gm) || []).length;
+assertEqual('舊格式訊息數推算', headingCount, 3);
+
+// ── Test 10: 對話 ID 擷取與資料夾匹配 ──────────────────────────────────────────
+print('\n【T10】對話 ID 擷取與資料夾匹配');
+
+assertEqual('標準 URL', extractChatId('https://gemini.google.com/app/abc123'), 'abc123');
+assertEqual('Gem 對話 URL', extractChatId('https://gemini.google.com/gem/xyz/app/def456'), 'def456');
+assertEqual('URL 帶 query', extractChatId('https://gemini.google.com/app/abc123?hl=zh-TW'), 'abc123');
+test('非對話 URL 回傳 null', () => extractChatId('https://gemini.google.com/') === null);
+
+assertEqual('jslog 擷取', extractChatIdFromJslog('186014; track:generic_click; BardVeMetadataKey:[["c_9a8b7c6d","r_x"]]'), '9a8b7c6d');
+test('jslog 無 ID 回傳 null', () => extractChatIdFromJslog('186014; track:generic_click') === null);
+
+// 資料夾後綴匹配（標題含底線也不誤判）
+const folderName = '學習筆記_Part_2_abc123';
+test('資料夾後綴匹配 convId', () => folderName.endsWith('_abc123'));
+test('不匹配其他 convId', () => !folderName.endsWith('_def456'));
 
 // ── Summary ─────────────────────────────────────────────────────────────────
 print('\n══════════════════════════════════════════');

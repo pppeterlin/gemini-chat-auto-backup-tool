@@ -375,7 +375,7 @@ async function init() {
     }
     // Re-check current chat status if relevant keys changed
     const syncKeys = Object.keys(changes).filter(
-      k => k.startsWith('hash_') || k.startsWith('chatSyncTime_')
+      k => k.startsWith('chatHash_') || k.startsWith('chatSyncTime_')
     );
     if (syncKeys.length) refreshCurrentChatStatus();
   });
