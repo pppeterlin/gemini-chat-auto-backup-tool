@@ -137,6 +137,31 @@ function parseBackupMeta(mdText) {
   return { hash: m[1], msgs: parseInt(m[2], 10) || 0, id: m[3] || '' };
 }
 
+// ── 立即停止：page-side abort flag ─────────────────────────────────────────────
+// storage 的 stopBackupRequested 只在背景迴圈的 checkpoint 之間被檢查，
+// 但最耗時的作業（歷史捲動、圖片下載）都在頁面內執行。廣播
+// window.__geminiBackupAborted 到所有 Gemini 分頁，頁面內的長迴圈每次輪詢
+// 都會檢查它，使用者按下「停止」後 < 500ms 內所有作業即可終止。
+async function broadcastAbortFlag(value) {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    await Promise.all((tabs || []).map(t =>
+      chrome.scripting.executeScript({
+        target: { tabId: t.id },
+        func: (v) => { window.__geminiBackupAborted = v; },
+        args: [value],
+      }).catch(() => {})
+    ));
+  } catch (_) {}
+}
+
+// 清除上一次備份留下的殘留狀態（stop flag、page-side abort flag），
+// 避免「按停止後重新備份」時舊狀態誤殺新作業
+async function clearStaleAbortState() {
+  await chrome.storage.local.remove('stopBackupRequested');
+  await broadcastAbortFlag(false);
+}
+
 // ── MAIN world clipboard bridge ────────────────────────────────────────────────
 // 注入頁面主世界，攔截 navigator.clipboard 寫入。content.js 點擊 Gemini 官方的
 // 「複製回覆」按鈕時，官方生成的 markdown 會被寫進 bridge 元素（不污染使用者的
@@ -217,11 +242,14 @@ async function extractConversation(tabId) {
 // Gemini 開啟長對話時只載入最近的訊息，需要往上捲動才會載入更早的歷史。
 // 策略（自 v2.2 起不再依賴 Gemini Voyager 的 timeline dot——新版 Voyager
 // 已將 dot 虛擬化，數量不再等於訊息數）：
-//   1. 將最上方的使用者訊息捲入視野 + 容器捲到頂端，觸發 infinite scroller 載入
-//   2. 用 MutationObserver 指紋（訊息數 + 最上方訊息文字）偵測是否有新內容
+//   1. 對所有候選容器捲到頂端並主動派發 scroll 事件（實測部分容器為
+//      overflow:hidden，單一容器 scrollTop=0 不會觸發 Gemini 的 listener）
+//   2. 用 MutationObserver 指紋（訊息數 + 最上方訊息文字）偵測是否有新內容；
+//      看到 Gemini 內建的 loading-history-spinner 就等它消失再判定
 //   3. 捲動沒反應時，模擬點擊最上方的使用者訊息（Voyager 1.5+ 驗證過的手法，
 //      會促使 Gemini 載入更早的歷史）
-//   4. 連續無新內容 → 歷史已完整載入
+//   4. 連續 2 圈無新內容（中間 backoff 重試）→ 歷史已完整載入
+//   5. 使用者按「停止」→ window.__geminiBackupAborted 旗標，任何等待中立即返回
 //
 // stopAtCount: 0 = 載入全部歷史（預設）
 //              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止
@@ -229,13 +257,15 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
   const run = () => chrome.scripting.executeScript({
     target: { tabId },
     func: async (stopAtCount, userSelectors, modelSelectors) => {
-      const wait = ms => new Promise(r => setTimeout(r, ms));
+      const MAX_ITERATIONS = 80;             // 每圈約載入 10–20 則 → 支援 800+ 則長對話
+      const WALL_TIMEOUT_MS = 5 * 60000;     // 整體上限 5 分鐘，避免無限卡住
+      const PROGRESS_TIMEOUT_MS = 8000;      // 每圈最多等 8 秒看是否有新內容
+      const SPINNER_FINISH_WAIT_MS = 10000;  // 看到 spinner 後等它消失的上限
+      const STABILITY_RETRIES = 2;           // 連續 N 圈無進度才視為「真的到頂」
+      const RETRY_BACKOFF_MS = 1500;         // 無進度後的喘息時間
 
-      // Expand any collapsed responses first
-      // v2: button uses data-test-id="luminous-expand-button"; older UI used aria-label
-      document.querySelectorAll(
-        '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
-      ).forEach(b => { try { b.click(); } catch (_) {} });
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      const isAborted = () => !!window.__geminiBackupAborted;
 
       function countBySelectors(selectors) {
         for (const sel of selectors) {
@@ -262,22 +292,75 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         return null;
       }
 
+      // 嚴格判斷「真正可捲動」：實測 #chat-history 與 .chat-history-scroll-container
+      // 是 overflow:hidden（設 scrollTop 沒效果），只有
+      // infinite-scroller[data-test-id="chat-history-container"] 真正可捲
+      function isScrollable(el) {
+        if (!el) return false;
+        if (el.scrollHeight <= el.clientHeight + 50) return false;
+        try {
+          const oy = getComputedStyle(el).overflowY;
+          return /(auto|scroll|overlay)/.test(oy);
+        } catch (_) { return true; }
+      }
+
       function getScrollEl() {
-        // v2 (2026 redesign, 實測): #chat-history.chat-history-scroll-container 是外層
-        // scroller；infinite-scroller[data-test-id="chat-history-container"] 在其內
-        return [
+        const candidates = [
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
           document.querySelector('#chat-history'),
           document.querySelector('.chat-history-scroll-container'),
-          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
           document.querySelector('infinite-scroller.chat-history'),
           document.querySelector('infinite-scroller'),
           document.querySelector('.chat-history'),
           document.querySelector('.cdk-virtual-scroll-viewport'),
           document.querySelector('main'),
           document.querySelector('[data-scroll-container]'),
-          document.scrollingElement,
-          document.documentElement,
-        ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
+        ];
+        for (const c of candidates) {
+          if (isScrollable(c)) return c;
+        }
+        // Fallback: 從首則訊息往上找最近可捲動的祖先
+        const firstMsg = getTopUserEl();
+        if (firstMsg) {
+          let el = firstMsg.parentElement;
+          while (el && el !== document.body) {
+            if (isScrollable(el)) return el;
+            el = el.parentElement;
+          }
+        }
+        return document.scrollingElement || document.documentElement;
+      }
+
+      // Gemini 內建 spinner — 抓更早歷史時顯示。判斷實際可見而非僅存在 DOM。
+      function isSpinnerVisible() {
+        const candidates = document.querySelectorAll(
+          '[data-test-id="loading-history-spinner"], ' +
+          '.loading-history-spinner-container mat-progress-spinner, ' +
+          '.loading-history-spinner-container mat-spinner'
+        );
+        for (const el of candidates) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            const cs = getComputedStyle(el);
+            if (cs.visibility !== 'hidden' && cs.display !== 'none' &&
+                parseFloat(cs.opacity || '1') > 0) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      // 展開 collapsed 回覆。注意排除 [data-test-id="luminous-expand-button"]——
+      // 它是側邊欄的展開鈕（aria-label 同為「展開」），點到會干擾側邊欄狀態。
+      function expandAllCollapsed() {
+        document.querySelectorAll(
+          'button[aria-label="Expand"], button[aria-label="展開"]'
+        ).forEach(b => {
+          if (b.getAttribute('data-test-id') === 'luminous-expand-button') return;
+          if (b.closest('bard-sidenav, [data-test-id="bard-sidenav-container"]')) return;
+          try { b.click(); } catch (_) {}
+        });
       }
 
       // 內容指紋：訊息數 + 最上方使用者訊息的文字片段。
@@ -288,7 +371,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         return `${countTurns()}|${sample}`;
       }
 
-      // MutationObserver + 輪詢等待內容變化，比固定 sleep 更快也更可靠
+      // MutationObserver + 輪詢等待內容變化；abort 時立即返回 false
       function waitForChange(before, timeoutMs) {
         return new Promise(resolve => {
           let done = false;
@@ -303,36 +386,82 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
             clearTimeout(tm);
             resolve(changed);
           };
-          const check = () => { if (fingerprint() !== before) finish(true); };
+          const check = () => {
+            if (isAborted()) { finish(false); return; }
+            if (fingerprint() !== before) finish(true);
+          };
           try {
             obs = new MutationObserver(check);
             obs.observe(document.body, { childList: true, subtree: true });
           } catch (_) {}
-          poll = setInterval(check, 300);
+          poll = setInterval(check, 250);
           tm = setTimeout(() => finish(false), timeoutMs);
         });
       }
 
+      // 觸發載入更早的歷史：對所有候選容器捲到頂 + 派發 scroll 事件
+      //（某些 listener 是 passive，scrollTop assignment 不會自動觸發）
+      function triggerLoadOlder() {
+        const topUser = getTopUserEl();
+        try { topUser?.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {}
+        const targets = [
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
+          document.querySelector('#chat-history'),
+          document.querySelector('.chat-history-scroll-container'),
+          document.querySelector('infinite-scroller'),
+          document.querySelector('.cdk-virtual-scroll-viewport'),
+          getScrollEl(),
+        ].filter(Boolean);
+        const seen = new Set();
+        for (const t of targets) {
+          if (seen.has(t)) continue;
+          seen.add(t);
+          try {
+            t.scrollTop = 0;
+            t.dispatchEvent(new Event('scroll', { bubbles: true }));
+          } catch (_) {}
+        }
+        window.scrollTo(0, 0);
+      }
+
+      expandAllCollapsed();
+
       // 已載入足夠數量 → 直接回到底部
       if (stopAtCount > 0 && countTurns() >= stopAtCount) {
         const el = getScrollEl();
-        el.scrollTop = el.scrollHeight;
+        if (el) el.scrollTop = el.scrollHeight;
         return;
       }
 
+      const startTime = Date.now();
+      let noProgress = 0;
       let clickTried = false;
-      for (let attempt = 0; attempt < 40; attempt++) {
+
+      for (let attempt = 0; attempt < MAX_ITERATIONS; attempt++) {
+        if (isAborted()) return;
+        if (Date.now() - startTime > WALL_TIMEOUT_MS) break;
+
         const before = fingerprint();
-        const scrollEl = getScrollEl();
-        const topUser = getTopUserEl();
+        triggerLoadOlder();
 
-        // 捲到最頂端，觸發載入更早的歷史
-        try { topUser?.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {}
-        scrollEl.scrollTop = 0;
-        window.scrollTo(0, 0);
+        let changed = await waitForChange(before, PROGRESS_TIMEOUT_MS);
+        if (isAborted()) return;
 
-        const changed = await waitForChange(before, 6000);
+        // spinner 還在轉表示 Gemini 正在抓歷史 — 等它消失再重新判定
+        if (!changed && isSpinnerVisible()) {
+          const spinnerDeadline = Date.now() + SPINNER_FINISH_WAIT_MS;
+          while (Date.now() < spinnerDeadline && isSpinnerVisible()) {
+            await wait(250);
+            if (isAborted()) return;
+          }
+          changed = fingerprint() !== before;
+        }
+
+        // 新載入的訊息可能含 collapsed 區段 — 每圈都重新展開
+        expandAllCollapsed();
+
         if (changed) {
+          noProgress = 0;
           clickTried = false;
           if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
           await wait(250);
@@ -340,24 +469,34 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         }
 
         // 捲動沒有觸發載入：點擊最上方的使用者訊息一次（Voyager 1.5+ 的手法）
-        if (!clickTried && topUser) {
+        if (!clickTried) {
           clickTried = true;
-          try {
-            const opts = { bubbles: true, cancelable: true, view: window };
-            topUser.dispatchEvent(new MouseEvent('mousedown', opts));
-            topUser.dispatchEvent(new MouseEvent('mouseup', opts));
-            topUser.click();
-          } catch (_) {}
-          const clickChanged = await waitForChange(fingerprint(), 6000);
-          if (clickChanged) continue;
+          const topUser = getTopUserEl();
+          if (topUser) {
+            try {
+              const opts = { bubbles: true, cancelable: true, view: window };
+              topUser.dispatchEvent(new MouseEvent('mousedown', opts));
+              topUser.dispatchEvent(new MouseEvent('mouseup', opts));
+              topUser.click();
+            } catch (_) {}
+            const clickChanged = await waitForChange(fingerprint(), PROGRESS_TIMEOUT_MS);
+            if (isAborted()) return;
+            if (clickChanged) { noProgress = 0; continue; }
+          }
         }
 
-        break; // 兩種策略都沒有新內容 → 歷史已完整載入
+        // 兩種策略都沒有新內容：backoff 後再確認一次，連續無進度才收工
+        noProgress++;
+        if (noProgress >= STABILITY_RETRIES) break;
+        await wait(RETRY_BACKOFF_MS);
+        if (isAborted()) return;
       }
 
-      // Restore to bottom
+      // Restore to bottom（Voyager 存在時點最後一個 dot 跳到最新訊息）
       const el = getScrollEl();
-      el.scrollTop = el.scrollHeight;
+      if (el) el.scrollTop = el.scrollHeight;
+      const dots = document.querySelectorAll('.timeline-dot');
+      if (dots.length) { try { dots[dots.length - 1].click(); } catch (_) {} }
       window.scrollTo(0, document.body.scrollHeight);
       await wait(400);
     },
@@ -388,12 +527,32 @@ async function waitForTabComplete(tabId, timeoutMs) {
 }
 
 // Navigate a tab to url and wait for it to finish loading
+const NAVIGATION_CANCELLED_MSG = '使用者已取消備份';
+
 function navigateAndWait(tabId, url, extraWaitMs = 2500) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(stopPoll);
       chrome.tabs.onUpdated.removeListener(onUpdated);
-      reject(new Error('頁面載入逾時（30 秒）'));
-    }, 30000);
+      fn(arg);
+    };
+
+    const timeout = setTimeout(
+      () => settle(reject, new Error('頁面載入逾時（30 秒）')),
+      30000
+    );
+
+    // 停止偵測：使用者按下「停止」時提早中斷 navigation 等待
+    const stopPoll = setInterval(async () => {
+      try {
+        const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
+        if (stopBackupRequested) settle(reject, new Error(NAVIGATION_CANCELLED_MSG));
+      } catch (_) {}
+    }, 300);
 
     let hasStartedLoading = false;
 
@@ -401,10 +560,9 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
       if (id !== tabId) return;
       if (info.status === 'loading') hasStartedLoading = true;
       if (hasStartedLoading && info.status === 'complete') {
-        clearTimeout(timeout);
         chrome.tabs.onUpdated.removeListener(onUpdated);
         // Extra wait for dynamic content to render (±30% jitter to look more human)
-        setTimeout(resolve, extraWaitMs * (0.7 + Math.random() * 0.6));
+        setTimeout(() => settle(resolve), extraWaitMs * (0.7 + Math.random() * 0.6));
       }
     }
 
@@ -413,11 +571,12 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
   });
 }
 
-// 導航失敗（逾時等）自動重試一次，第二次失敗才往外拋
+// 導航失敗（逾時等）自動重試一次，第二次失敗才往外拋；使用者取消不重試
 async function navigateAndWaitRetry(tabId, url, extraWaitMs = 2500) {
   try {
     await navigateAndWait(tabId, url, extraWaitMs);
-  } catch (_) {
+  } catch (err) {
+    if (err?.message === NAVIGATION_CANCELLED_MSG) throw err;
     await randomDelay(2000, 4000);
     await navigateAndWait(tabId, url, extraWaitMs);
   }
@@ -685,33 +844,56 @@ async function scrollSidebarToLoadAll(tabId) {
     func: async () => {
       const wait = ms => new Promise(r => setTimeout(r, ms));
 
-      // Find the sidebar scroll container (try several known selectors)
-      function findSidebarEl() {
-        const candidates = [
-          // v2 (2026 redesign)
-          document.querySelector('conversations-list[data-test-id="all-conversations"]'),
-          document.querySelector('[data-test-id="bard-sidenav-container"] infinite-scroller'),
-          document.querySelector('[data-test-id="bard-sidenav-container"]'),
-          // legacy
-          document.querySelector('.conversations-list'),
-          document.querySelector('mat-sidenav .conversations'),
-          document.querySelector('[data-test-id="sidebar"] [cdkvirtualscrollviewport]'),
-          document.querySelector('[data-test-id="all-conversations"]'),
-          document.querySelector('[data-test-id="overflow-container"]'),
-          document.querySelector('infinite-scroller'),
-          document.querySelector('.conversation-list'),
-          document.querySelector('nav'),
-          // Broadest fallback: leftmost tall scrollable element
-          ...Array.from(document.querySelectorAll('*')).filter(el => {
-            const r = el.getBoundingClientRect();
-            return r.left < 300 && r.height > 400 && el.scrollHeight > el.clientHeight + 100;
-          }),
-        ].filter(Boolean);
-        return candidates[0] || null;
+      // Find the sidebar's TRULY scrollable container.
+      // v2 (2026 redesign) 實測：conversations-list 的 scrollHeight == clientHeight，
+      // 不能捲！真正可捲的是 sidebar 內另一個 <infinite-scroller>（不同於 chat 區的），
+      // 要靠 scrollHeight + overflow-y 判斷真實可捲動性來區分。
+      function findSidebarScrollEl() {
+        const isScrollable = el => {
+          if (!el) return false;
+          if (el.scrollHeight <= el.clientHeight + 50) return false;
+          try {
+            const oy = getComputedStyle(el).overflowY;
+            return /(auto|scroll|overlay)/.test(oy);
+          } catch (_) { return true; }
+        };
+        // 候選 1：sidebar root 範圍內的 <infinite-scroller>
+        const root = document.querySelector(
+          'bard-sidenav, [data-test-id="bard-sidenav-container"]'
+        );
+        if (root) {
+          const innerIS = root.querySelector('infinite-scroller');
+          if (isScrollable(innerIS)) return innerIS;
+        }
+        // 候選 2：從第一個對話項目往上找最近可捲動祖先（最可靠的 fallback）
+        const firstItem = document.querySelector(
+          'a[href*="/app/"], [data-test-id="conversation"]'
+        );
+        if (firstItem) {
+          let el = firstItem.parentElement;
+          while (el && el !== document.body) {
+            if (isScrollable(el)) return el;
+            el = el.parentElement;
+          }
+        }
+        // legacy fallbacks
+        for (const sel of [
+          'conversations-list[data-test-id="all-conversations"]',
+          '.cdk-virtual-scroll-viewport',
+          'mat-sidenav .conversations',
+          '.conversations-list',
+          '.conversation-list',
+        ]) {
+          const el = document.querySelector(sel);
+          if (isScrollable(el)) return el;
+        }
+        return null;
       }
 
-      const sidebarEl = findSidebarEl();
-      if (!sidebarEl) return; // Can't find sidebar — give up gracefully
+      const sidebarEl = findSidebarScrollEl();
+      // 找不到可捲動容器：可能結構已變，或對話少到不需捲動。
+      // 不算錯誤 — 後續 scanner 仍會掃描已 render 的對話
+      if (!sidebarEl) return;
 
       function countConversationItems() {
         return Math.max(
@@ -724,6 +906,8 @@ async function scrollSidebarToLoadAll(tabId) {
 
       for (let attempt = 0; attempt < 30; attempt++) {
         sidebarEl.scrollTop = sidebarEl.scrollHeight;
+        // 主動派發 scroll 事件 — 某些 listener 是 passive 不會被 assignment 觸發
+        try { sidebarEl.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
         await wait(1200);
 
         const newCount = countConversationItems();
@@ -745,6 +929,9 @@ async function performFullHistoryBackup(limitCount = 0) {
   // Prevent duplicate runs
   const { fullBackupState: running } = await chrome.storage.local.get('fullBackupState');
   if (running?.inProgress) return;
+
+  // 啟動新一輪備份 — 清除前次「按停止」殘留的 stop / abort 旗標，避免誤殺本次作業
+  await clearStaleAbortState();
 
   const state = {
     inProgress: true,
@@ -798,6 +985,53 @@ async function performFullHistoryBackup(limitCount = 0) {
     const tab = tabs[0];
     const tabId = tab.id;
     const originalUrl = tab.url;
+
+    // ── 主動展開 sidebar（若為 collapsed 狀態）──────────────────────────────
+    // Gemini 2026 改版後 sidebar 預設為 hover-to-expand (collapsed) 模式，
+    // 此狀態下對話項目全為空殼，無法掃描。實測
+    // [data-test-id="side-nav-sparkle-button"]（aria-label="開啟側欄"）
+    // 是真正的展開按鈕 — 程式化 click 即可展開並 render 完整對話清單。
+    try {
+      const [openResult] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async () => {
+          const wait = ms => new Promise(r => setTimeout(r, ms));
+          const sn = document.querySelector('bard-sidenav');
+          const wasCollapsed = sn?.classList?.contains('collapsed') || false;
+
+          if (wasCollapsed) {
+            const openBtn = document.querySelector('[data-test-id="side-nav-sparkle-button"]');
+            if (openBtn) {
+              try { openBtn.click(); } catch (_) {}
+              // 等候 sidebar 展開、virtual scroll 完成 render
+              for (let i = 0; i < 20; i++) {
+                await wait(250);
+                if (document.querySelectorAll('a[href*="/app/"]').length >= 5) break;
+              }
+            }
+          }
+
+          const navItems = document.querySelectorAll(
+            'gem-nav-list-item[data-test-id="conversation"], [data-test-id="conversation"]'
+          ).length;
+          const links = document.querySelectorAll('a[href*="/app/"]').length;
+          const stillCollapsed =
+            document.querySelector('bard-sidenav')?.classList?.contains('collapsed') || false;
+          const ratio = navItems > 0 ? links / navItems : 1;
+          const mostlyEmpty = navItems >= 10 && ratio < 0.3;
+          return { wasCollapsed, stillCollapsed, navItems, links, mostlyEmpty };
+        },
+      });
+      const r = openResult?.result;
+      if (r && r.wasCollapsed && (r.stillCollapsed || r.mostlyEmpty)) {
+        state.inProgress = false;
+        state.fatalError =
+          `無法展開對話側邊欄（共 ${r.navItems} 個項目，僅 ${r.links} 個已 render）。\n` +
+          `請手動點 Gemini 左上角的 ✨ 圖示展開側邊欄，看到完整對話清單後再執行全量備份。`;
+        await saveState();
+        return;
+      }
+    } catch (_) {} // 偵測失敗就照常繼續，sidebar_scanner 結果為空時有既有錯誤處理
 
     // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
     try {
@@ -937,6 +1171,12 @@ async function performFullHistoryBackup(limitCount = 0) {
           if (s) { await handleStop(); return; } }
 
         const data = await extractConversation(tabId);
+
+        // ── Stop check #5：content.js 執行完後立即確認（圖片下載可能耗時 10+ 秒）──
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) { await handleStop(); return; } }
+        if (data?.aborted) { await handleStop(); return; } // content.js 內部偵測到 abort
+
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
@@ -1024,6 +1264,9 @@ async function performRetryFailedBackup() {
     c => c.status === 'failed' || c.status === 'pending'
   );
   if (!retryTargets.length) return;
+
+  // 啟動重試前清除殘留 stop / abort 狀態（與全量備份對齊）
+  await clearStaleAbortState();
 
   // 將重試目標 status 全部重設為 pending，保留其餘已完成的紀錄
   const resetConversations = (currentState.conversations || []).map(c =>
@@ -1121,6 +1364,32 @@ async function performRetryFailedBackup() {
         await scrollToLoadAllMessages(tabId, 0);
 
         const data = await extractConversation(tabId);
+
+        // Stop check：content.js 執行完後立即確認（圖片下載可能耗時 10+ 秒）
+        { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
+          if (s) {
+            await chrome.storage.local.remove('stopBackupRequested');
+            state.inProgress = false;
+            state.stoppedByUser = true;
+            state.currentTitle = '';
+            state.currentUrl = '';
+            state.completedAt = new Date().toISOString();
+            await saveState();
+            try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+            return;
+          }
+        }
+        if (data?.aborted) {
+          state.inProgress = false;
+          state.stoppedByUser = true;
+          state.currentTitle = '';
+          state.currentUrl = '';
+          state.completedAt = new Date().toISOString();
+          await saveState();
+          try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+          return;
+        }
+
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
@@ -1212,6 +1481,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.action === 'stopFullBackup') {
     chrome.storage.local.set({ stopBackupRequested: true });
+    // 同步廣播 page-side abort flag — 頁面內的長迴圈（歷史捲動、圖片下載、
+    // 官方複製擷取）每次輪詢都會檢查，立即跳出而不必等到下一個背景 checkpoint
+    broadcastAbortFlag(true);
     sendResponse({ ok: true });
     return true;
   }
