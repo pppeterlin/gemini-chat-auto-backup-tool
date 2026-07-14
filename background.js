@@ -6,6 +6,33 @@ const DB_NAME = 'gemini-backup-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'handles';
 
+// ── 訊息選擇器（與 content.js 保持同步）───────────────────────────────────────────
+// 參考 gemini-voyager 持續維護的清單，涵蓋新舊版 Gemini DOM
+const USER_TURN_SELECTORS = [
+  'user-query',
+  '.user-query-bubble-with-background',
+  '.user-query-bubble-container',
+  '.user-query-container',
+  '.user-query-content',
+  '.query-content',
+  'div[aria-label="User message"]',
+  'article[data-turn="user"]',
+  '[data-message-author-role="user"]',
+  '.human-turn',
+];
+
+const MODEL_TURN_SELECTORS = [
+  'model-response',
+  '[aria-label="Gemini response"]',
+  '.model-response-text',
+  'response-container .response-content',
+  '.presented-response-container',
+  'article[data-turn="model"]',
+  '[data-message-author-role="model"]',
+  '[data-message-author-role="assistant"]',
+  '.ai-response',
+];
+
 // ── IndexedDB helpers ──────────────────────────────────────────────────────────
 
 function openDB() {
@@ -46,6 +73,25 @@ async function setupAlarm(intervalHours) {
   }
 }
 
+// ── Service worker keepalive ───────────────────────────────────────────────────
+// MV3 service worker 閒置 30 秒會被 Chrome 回收；長時間的全量備份過程中，
+// 每 20 秒呼叫一次極輕量的擴充 API 重置閒置計時器，避免備份中途被殺掉。
+let keepaliveTimer = null;
+
+function startKeepalive() {
+  if (keepaliveTimer) return;
+  keepaliveTimer = setInterval(() => {
+    try { chrome.runtime.getPlatformInfo(() => {}); } catch (_) {}
+  }, 20000);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
+
 // ── Utility functions ──────────────────────────────────────────────────────────
 
 // 隨機延遲，防止被 Google 偵測為自動化機器人
@@ -81,127 +127,264 @@ function stableConvId(url) {
   return (h >>> 0).toString(16);
 }
 
-// Load the full conversation history before extracting content.
-//
-// Strategy A – Voyager timeline (preferred):
-//   Voyager injects `.timeline-dot` buttons; clicking the first one jumps to the
-//   earliest loaded turn and triggers Gemini to fetch older history.
-//   We repeat until the dot count stops increasing (= no more history).
-//
-// Strategy B – Manual scrollTop fallback (no Voyager):
-//   Set scrollTop = 0, wait. When new messages are prepended the browser pushes
-//   the viewport down (scrollTop > 0). Repeat until no shift detected.
-// stopAtCount: 0 = 載入全部歷史（預設行為）
-//              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止，不再往前捲動
-//
-// 使用場景：對話已備份過（prevMsgCount > 0），只需捲回到上次備份的數量即可。
-// 新訊息在頁面載入時就已在 DOM 底部，捲回到 prevMsgCount 後 DOM 即包含完整內容。
-async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
-  await chrome.scripting.executeScript({
+// 解析備份檔尾的 meta 註記（content.js 寫入）：
+// <!-- gemini-backup:v1 hash=xxxx msgs=NN id=yyy -->
+function parseBackupMeta(mdText) {
+  const m = (mdText || '').match(
+    /<!--\s*gemini-backup:v1\s+hash=([0-9a-f]+)\s+msgs=(\d+)(?:\s+id=([a-zA-Z0-9_-]*))?\s*-->/
+  );
+  if (!m) return null;
+  return { hash: m[1], msgs: parseInt(m[2], 10) || 0, id: m[3] || '' };
+}
+
+// ── MAIN world clipboard bridge ────────────────────────────────────────────────
+// 注入頁面主世界，攔截 navigator.clipboard 寫入。content.js 點擊 Gemini 官方的
+// 「複製回覆」按鈕時，官方生成的 markdown 會被寫進 bridge 元素（不污染使用者的
+// 真實剪貼簿），content.js 再從 bridge 讀出。這讓備份能拿到 Google 官方導出格式。
+function installClipboardBridge() {
+  try {
+    if (window.__gcbBridgeInstalled) return;
+    window.__gcbBridgeInstalled = true;
+
+    const el = document.createElement('div');
+    el.id = '__gcb-clip-bridge';
+    el.style.display = 'none';
+    el.setAttribute('data-seq', '0');
+    el.setAttribute('data-capture', '0');
+    document.documentElement.appendChild(el);
+
+    const capturing = () => el.getAttribute('data-capture') === '1';
+    const deliver = (text) => {
+      el.textContent = String(text || '');
+      el.setAttribute('data-seq', String(Number(el.getAttribute('data-seq') || '0') + 1));
+    };
+
+    const origWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+    const origWrite = navigator.clipboard.write.bind(navigator.clipboard);
+
+    navigator.clipboard.writeText = function (text) {
+      if (capturing()) { deliver(text); return Promise.resolve(); }
+      return origWriteText(text);
+    };
+
+    navigator.clipboard.write = function (items) {
+      if (!capturing()) return origWrite(items);
+      (async () => {
+        try {
+          for (const it of (items || [])) {
+            if (it.types && it.types.includes('text/plain')) {
+              const blob = await it.getType('text/plain');
+              deliver(await blob.text());
+              return;
+            }
+          }
+          deliver('');
+        } catch (_) { deliver(''); }
+      })();
+      return Promise.resolve();
+    };
+
+    // execCommand('copy') fallback：頁面透過 copy 事件寫剪貼簿時攔截
+    window.addEventListener('copy', (e) => {
+      if (!capturing()) return;
+      try {
+        const t = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+        if (t) { deliver(t); e.preventDefault(); }
+      } catch (_) {}
+    }, false);
+  } catch (_) {}
+}
+
+// 注入 clipboard bridge（失敗不影響備份，content.js 會退回 DOM 轉換）再執行擷取
+async function extractConversation(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: installClipboardBridge,
+    });
+  } catch (_) {}
+
+  const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: async (stopAtCount) => {
+    files: ['content.js'],
+  });
+  return results?.[0]?.result;
+}
+
+// ── 完整歷史載入 ───────────────────────────────────────────────────────────────
+//
+// Gemini 開啟長對話時只載入最近的訊息，需要往上捲動才會載入更早的歷史。
+// 策略（自 v2.2 起不再依賴 Gemini Voyager 的 timeline dot——新版 Voyager
+// 已將 dot 虛擬化，數量不再等於訊息數）：
+//   1. 將最上方的使用者訊息捲入視野 + 容器捲到頂端，觸發 infinite scroller 載入
+//   2. 用 MutationObserver 指紋（訊息數 + 最上方訊息文字）偵測是否有新內容
+//   3. 捲動沒反應時，模擬點擊最上方的使用者訊息（Voyager 1.5+ 驗證過的手法，
+//      會促使 Gemini 載入更早的歷史）
+//   4. 連續無新內容 → 歷史已完整載入
+//
+// stopAtCount: 0 = 載入全部歷史（預設）
+//              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止
+async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
+  const run = () => chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (stopAtCount, userSelectors, modelSelectors) => {
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+
       // Expand any collapsed responses first
       // v2: button uses data-test-id="luminous-expand-button"; older UI used aria-label
       document.querySelectorAll(
         '[data-test-id="luminous-expand-button"], button[aria-label="Expand"], button[aria-label="展開"]'
       ).forEach(b => { try { b.click(); } catch (_) {} });
 
-      const wait = ms => new Promise(r => setTimeout(r, ms));
-
-      function countTurns() {
-        return Math.max(
-          document.querySelectorAll('user-query').length,
-          document.querySelectorAll('model-response').length,
-          document.querySelectorAll('.query-content').length,
-          document.querySelectorAll('.response-content').length,
-        );
-      }
-
-      // ── Strategy A: Voyager timeline dots ───────────────────────────────────
-      const getFirstDot = () => document.querySelector('.timeline-dot[data-marker-index="0"]')
-                              || document.querySelector('.timeline-dot');
-
-      if (getFirstDot()) {
-        for (let attempt = 0; attempt < 30; attempt++) {
-          // 已載入足夠數量，提前停止
-          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
-
-          const dot = getFirstDot();
-          if (!dot) break;
-
-          const prevCount = document.querySelectorAll('.timeline-dot').length;
-          dot.click(); // Jump to earliest loaded turn → Gemini fetches older history
-
-          // Wait up to 8 s for new dots to appear (new turns = new dots)
-          let newDotsFound = false;
-          for (let t = 0; t < 16; t++) {
-            await wait(500);
-            if (document.querySelectorAll('.timeline-dot').length > prevCount) {
-              newDotsFound = true;
-              break;
-            }
-          }
-
-          if (!newDotsFound) break; // Dot count stable → full history loaded
+      function countBySelectors(selectors) {
+        for (const sel of selectors) {
+          try {
+            const n = document.querySelectorAll(sel).length;
+            if (n) return n;
+          } catch (_) {}
         }
-
-        // Click the LAST dot to restore view to the most recent message
-        const dots = document.querySelectorAll('.timeline-dot');
-        if (dots.length) dots[dots.length - 1].click();
-        await wait(500);
-        return;
+        return 0;
       }
 
-      // ── Strategy B: Manual scroll fallback ──────────────────────────────────
-      // v2 (2026 redesign): #chat-history.chat-history-scroll-container is the outer
-      // scroller; infinite-scroller[data-test-id="chat-history-container"] is inside.
-      const scrollEl = [
-        document.querySelector('#chat-history'),
-        document.querySelector('.chat-history-scroll-container'),
-        document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
-        document.querySelector('.cdk-virtual-scroll-viewport'),
-        document.querySelector('main'),
-        document.querySelector('[data-scroll-container]'),
-        document.scrollingElement,
-        document.documentElement,
-      ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
+      // 與 chatMsgCount 相同口徑：使用者訊息 + 模型回覆總數
+      function countTurns() {
+        return countBySelectors(userSelectors) + countBySelectors(modelSelectors);
+      }
 
-      // 已載入足夠數量，跳過捲動
+      function getTopUserEl() {
+        for (const sel of userSelectors) {
+          try {
+            const els = document.querySelectorAll(sel);
+            if (els.length) return els[0];
+          } catch (_) {}
+        }
+        return null;
+      }
+
+      function getScrollEl() {
+        // v2 (2026 redesign, 實測): #chat-history.chat-history-scroll-container 是外層
+        // scroller；infinite-scroller[data-test-id="chat-history-container"] 在其內
+        return [
+          document.querySelector('#chat-history'),
+          document.querySelector('.chat-history-scroll-container'),
+          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
+          document.querySelector('infinite-scroller.chat-history'),
+          document.querySelector('infinite-scroller'),
+          document.querySelector('.chat-history'),
+          document.querySelector('.cdk-virtual-scroll-viewport'),
+          document.querySelector('main'),
+          document.querySelector('[data-scroll-container]'),
+          document.scrollingElement,
+          document.documentElement,
+        ].find(el => el && el.scrollHeight > el.clientHeight + 50) || document.documentElement;
+      }
+
+      // 內容指紋：訊息數 + 最上方使用者訊息的文字片段。
+      // 新歷史載入時兩者至少會變其一（單看數量在虛擬化 DOM 下不可靠）。
+      function fingerprint() {
+        const top = getTopUserEl();
+        const sample = top ? (top.textContent || '').slice(0, 200) : '';
+        return `${countTurns()}|${sample}`;
+      }
+
+      // MutationObserver + 輪詢等待內容變化，比固定 sleep 更快也更可靠
+      function waitForChange(before, timeoutMs) {
+        return new Promise(resolve => {
+          let done = false;
+          let obs = null;
+          let poll = null;
+          let tm = null;
+          const finish = (changed) => {
+            if (done) return;
+            done = true;
+            try { obs?.disconnect(); } catch (_) {}
+            clearInterval(poll);
+            clearTimeout(tm);
+            resolve(changed);
+          };
+          const check = () => { if (fingerprint() !== before) finish(true); };
+          try {
+            obs = new MutationObserver(check);
+            obs.observe(document.body, { childList: true, subtree: true });
+          } catch (_) {}
+          poll = setInterval(check, 300);
+          tm = setTimeout(() => finish(false), timeoutMs);
+        });
+      }
+
+      // 已載入足夠數量 → 直接回到底部
       if (stopAtCount > 0 && countTurns() >= stopAtCount) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
+        const el = getScrollEl();
+        el.scrollTop = el.scrollHeight;
         return;
       }
 
-      let prevTurnCount = countTurns();
+      let clickTried = false;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const before = fingerprint();
+        const scrollEl = getScrollEl();
+        const topUser = getTopUserEl();
 
-      for (let attempt = 0; attempt < 30; attempt++) {
+        // 捲到最頂端，觸發載入更早的歷史
+        try { topUser?.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {}
         scrollEl.scrollTop = 0;
         window.scrollTo(0, 0);
 
-        let newContentFound = false;
-        for (let t = 0; t < 16; t++) {
-          await wait(500);
-          const curr = countTurns();
-          if (scrollEl.scrollTop > 0 || curr > prevTurnCount) {
-            prevTurnCount = Math.max(prevTurnCount, curr);
-            newContentFound = true;
-            break;
-          }
+        const changed = await waitForChange(before, 6000);
+        if (changed) {
+          clickTried = false;
+          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
+          await wait(250);
+          continue;
         }
 
-        if (!newContentFound) break;
+        // 捲動沒有觸發載入：點擊最上方的使用者訊息一次（Voyager 1.5+ 的手法）
+        if (!clickTried && topUser) {
+          clickTried = true;
+          try {
+            const opts = { bubbles: true, cancelable: true, view: window };
+            topUser.dispatchEvent(new MouseEvent('mousedown', opts));
+            topUser.dispatchEvent(new MouseEvent('mouseup', opts));
+            topUser.click();
+          } catch (_) {}
+          const clickChanged = await waitForChange(fingerprint(), 6000);
+          if (clickChanged) continue;
+        }
 
-        // 已載入足夠數量，提前停止往前捲動
-        if (stopAtCount > 0 && prevTurnCount >= stopAtCount) break;
+        break; // 兩種策略都沒有新內容 → 歷史已完整載入
       }
 
       // Restore to bottom
-      scrollEl.scrollTop = scrollEl.scrollHeight;
+      const el = getScrollEl();
+      el.scrollTop = el.scrollHeight;
       window.scrollTo(0, document.body.scrollHeight);
-      await wait(500);
+      await wait(400);
     },
-    args: [stopAtCount],
+    args: [stopAtCount, USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
   });
+
+  try {
+    await run();
+  } catch (_) {
+    // 點擊最上方訊息偶爾會觸發整頁重載（Voyager 亦有相同情況），
+    // 此時 executeScript 會中斷；等頁面重新載入完成後重跑一次。
+    await waitForTabComplete(tabId, 20000);
+    await new Promise(r => setTimeout(r, 2500));
+    await run();
+  }
+}
+
+// 等待分頁進入 complete 狀態（輪詢，最長 timeoutMs）
+async function waitForTabComplete(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete') return;
+    } catch (_) { return; }
+    await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 // Navigate a tab to url and wait for it to finish loading
@@ -228,6 +411,16 @@ function navigateAndWait(tabId, url, extraWaitMs = 2500) {
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.update(tabId, { url });
   });
+}
+
+// 導航失敗（逾時等）自動重試一次，第二次失敗才往外拋
+async function navigateAndWaitRetry(tabId, url, extraWaitMs = 2500) {
+  try {
+    await navigateAndWait(tabId, url, extraWaitMs);
+  } catch (_) {
+    await randomDelay(2000, 4000);
+    await navigateAndWait(tabId, url, extraWaitMs);
+  }
 }
 
 // ── 圖片儲存 helpers ───────────────────────────────────────────────────────────
@@ -266,6 +459,102 @@ async function saveConversationFiles(dirHandle, safeTitle, convId, content, imag
   return { folderName };
 }
 
+// 確認本地備份是否真的存在（storage 說有備份、但使用者可能手動刪除了資料夾）
+async function localBackupExists(dirHandle, folderName) {
+  if (!folderName) return false;
+  try {
+    await dirHandle.getDirectoryHandle(folderName);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ── 本地備份索引重建 ────────────────────────────────────────────────────────────
+// chrome.storage 遺失時（擴充套件重裝、儲存空間被清除），直接掃描備份資料夾、
+// 讀取檔尾 meta 註記恢復 hash / msgCount / folderName，讓增量判斷不必依賴
+// storage 的存續——備份資料夾本身就是索引的真實來源。
+async function seedStorageFromLocalBackups(dirHandle, convs) {
+  // 1. 找出 storage 中缺少索引資料的對話
+  const missing = [];
+  for (const conv of convs) {
+    const convId = stableConvId(conv.url);
+    const keys = [`chatHash_${convId}`, `chatFolderName_${convId}`, `chatMsgCount_${convId}`];
+    const stored = await chrome.storage.local.get(keys);
+    if (!stored[`chatHash_${convId}`] || !stored[`chatFolderName_${convId}`] ||
+        !stored[`chatMsgCount_${convId}`]) {
+      missing.push({ convId, stored });
+    }
+  }
+  if (!missing.length) return 0;
+
+  // 2. 列舉備份資料夾（一次），之後逐一比對
+  const entries = [];
+  try {
+    for await (const [name, handle] of dirHandle.entries()) {
+      entries.push({ name, handle });
+    }
+  } catch (_) {
+    return 0;
+  }
+
+  let seeded = 0;
+  for (const { convId, stored } of missing) {
+    let mdText = null;
+    let folderName = null;
+
+    const dirEntry = entries.find(
+      e => e.handle.kind === 'directory' && e.name.endsWith(`_${convId}`)
+    );
+    if (dirEntry) {
+      folderName = dirEntry.name;
+      try {
+        for await (const [fname, fh] of dirEntry.handle.entries()) {
+          if (fh.kind === 'file' && fname.endsWith('.md')) {
+            mdText = await (await fh.getFile()).text();
+            break;
+          }
+        }
+      } catch (_) {}
+    } else {
+      // 舊版單檔格式 [title]_[convId].md
+      const fileEntry = entries.find(
+        e => e.handle.kind === 'file' && e.name.endsWith(`_${convId}.md`)
+      );
+      if (fileEntry) {
+        try { mdText = await (await fileEntry.handle.getFile()).text(); } catch (_) {}
+      }
+    }
+
+    if (mdText === null && !folderName) continue;
+
+    const update = {};
+    if (folderName && !stored[`chatFolderName_${convId}`]) {
+      update[`chatFolderName_${convId}`] = folderName;
+    }
+    if (mdText !== null) {
+      const meta = parseBackupMeta(mdText);
+      if (meta) {
+        if (meta.hash && !stored[`chatHash_${convId}`]) {
+          update[`chatHash_${convId}`] = meta.hash;
+        }
+        if (meta.msgs > 0 && !stored[`chatMsgCount_${convId}`]) {
+          update[`chatMsgCount_${convId}`] = meta.msgs;
+        }
+      } else if (!stored[`chatMsgCount_${convId}`]) {
+        // 舊格式檔案沒有 meta 註記：從段落標題推回訊息數（hash 未知，之後會重新擷取一次）
+        const count = (mdText.match(/^## (使用者|Gemini)$/gm) || []).length;
+        if (count > 0) update[`chatMsgCount_${convId}`] = count;
+      }
+    }
+    if (Object.keys(update).length) {
+      await chrome.storage.local.set(update);
+      seeded++;
+    }
+  }
+  return seeded;
+}
+
 // ── Single-conversation backup ─────────────────────────────────────────────────
 
 async function backupSingleTab(tab, dirHandle) {
@@ -274,8 +563,7 @@ async function backupSingleTab(tab, dirHandle) {
   // 新訊息已在頁面底部，舊訊息捲回到 prevMsgCount 後 DOM 即包含完整內容。
   const convId = stableConvId(tab.url);
   const preStored = await chrome.storage.local.get([
-    `hash_${encodeURIComponent(tab.url)}`,
-    `chatFilename_${convId}`,
+    `chatHash_${convId}`,
     `chatFolderName_${convId}`,
     `chatMsgCount_${convId}`,
   ]);
@@ -283,30 +571,26 @@ async function backupSingleTab(tab, dirHandle) {
 
   await scrollToLoadAllMessages(tab.id, prevMsgCount);
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['content.js'],
-  });
-
-  const data = results?.[0]?.result;
+  const data = await extractConversation(tab.id);
   if (!data || !data.content) {
     return { skipped: true, reason: '無法擷取對話內容（頁面可能不是對話頁）' };
   }
 
   const { title, content, hash, url, messages, images } = data;
   const realConvId = stableConvId(url);
-  const storageKey = `hash_${encodeURIComponent(url)}`;
   // 若 tab.url 和 content.js 拿到的 url 相同，直接複用 preStored；否則重新查詢
   const stored = realConvId === convId ? preStored : await chrome.storage.local.get([
-    storageKey,
-    `chatFilename_${realConvId}`,
+    `chatHash_${realConvId}`,
     `chatFolderName_${realConvId}`,
     `chatMsgCount_${realConvId}`,
   ]);
 
-  // hash 相同且已有資料夾備份 → 真正略過；hash 相同但只有舊 .md → 繼續以遷移至資料夾格式
-  const alreadyFolder = !!stored[`chatFolderName_${realConvId}`];
-  if (stored[storageKey] === hash && alreadyFolder) {
+  // hash 相同且本地資料夾確實存在 → 真正略過；否則重新寫入
+  //（涵蓋舊 .md 遷移與使用者手動刪除資料夾的情況）
+  const alreadyFolder = await localBackupExists(
+    dirHandle, stored[`chatFolderName_${realConvId}`]
+  );
+  if (stored[`chatHash_${realConvId}`] === hash && alreadyFolder) {
     return { skipped: true, reason: '無新內容' };
   }
 
@@ -327,20 +611,20 @@ async function backupSingleTab(tab, dirHandle) {
   );
 
   const storageUpdate = {
-    [storageKey]: hash,
+    [`chatHash_${realConvId}`]: hash,
     [`chatMsgCount_${realConvId}`]: currMsgCount,
     [`chatSyncTime_${realConvId}`]: now,
   };
-  if (saveKeys.filename) storageUpdate[`chatFilename_${realConvId}`] = saveKeys.filename;
   if (saveKeys.folderName) storageUpdate[`chatFolderName_${realConvId}`] = saveKeys.folderName;
   await chrome.storage.local.set(storageUpdate);
 
-  return { saved: true, filename: saveKeys.folderName || saveKeys.filename };
+  return { saved: true, filename: saveKeys.folderName };
 }
 
 // ── Core backup logic (current open tabs) ──────────────────────────────────────
 
 async function performBackup() {
+  startKeepalive();
   try {
     const dirHandle = await getFromDB('directoryHandle');
     if (!dirHandle) {
@@ -384,6 +668,8 @@ async function performBackup() {
   } catch (err) {
     console.error('[Backup] Fatal error:', err);
     return { success: false, error: err.message };
+  } finally {
+    stopKeepalive();
   }
 }
 
@@ -410,6 +696,8 @@ async function scrollSidebarToLoadAll(tabId) {
           document.querySelector('.conversations-list'),
           document.querySelector('mat-sidenav .conversations'),
           document.querySelector('[data-test-id="sidebar"] [cdkvirtualscrollviewport]'),
+          document.querySelector('[data-test-id="all-conversations"]'),
+          document.querySelector('[data-test-id="overflow-container"]'),
           document.querySelector('infinite-scroller'),
           document.querySelector('.conversation-list'),
           document.querySelector('nav'),
@@ -425,13 +713,20 @@ async function scrollSidebarToLoadAll(tabId) {
       const sidebarEl = findSidebarEl();
       if (!sidebarEl) return; // Can't find sidebar — give up gracefully
 
-      let prevCount = document.querySelectorAll('a[href*="/app/"]').length;
+      function countConversationItems() {
+        return Math.max(
+          document.querySelectorAll('a[href*="/app/"]').length,
+          document.querySelectorAll('[data-test-id="conversation"]').length,
+        );
+      }
+
+      let prevCount = countConversationItems();
 
       for (let attempt = 0; attempt < 30; attempt++) {
         sidebarEl.scrollTop = sidebarEl.scrollHeight;
         await wait(1200);
 
-        const newCount = document.querySelectorAll('a[href*="/app/"]').length;
+        const newCount = countConversationItems();
         if (newCount === prevCount) break; // Stable — all conversations loaded
         prevCount = newCount;
       }
@@ -474,6 +769,7 @@ async function performFullHistoryBackup(limitCount = 0) {
     await chrome.storage.local.set({ fullBackupState: { ...state } });
   }
 
+  startKeepalive();
   try {
     const dirHandle = await getFromDB('directoryHandle');
     if (!dirHandle) {
@@ -541,9 +837,6 @@ async function performFullHistoryBackup(limitCount = 0) {
     // 超出 limit 的非 Pinned 對話（本次不處理，但不是錯誤）
     state.excluded = conversations.length - candidateConvs.length;
 
-    // 全部候選對話都需要導航過去比對 hash——
-    // 不能在這裡預先過濾「已備份」，因為對話可能自上次備份後有新訊息。
-    // 真正的「跳過」判斷在導航後拿到 content.js 結果再比對。
     state.total = candidateConvs.length;
     state.skipped = 0;
     // 從一開始就建立完整清單，status=pending；手動停止時未處理的也看得到
@@ -551,6 +844,14 @@ async function performFullHistoryBackup(limitCount = 0) {
       url: c.url, title: c.title, status: 'pending', reason: null,
     }));
     await saveState();
+
+    // storage 缺索引時，從備份資料夾的 meta 註記恢復（增量判斷不依賴 storage 存續）
+    try {
+      const seeded = await seedStorageFromLocalBackups(dirHandle, candidateConvs);
+      if (seeded > 0) console.log(`[FullBackup] 從本地備份重建 ${seeded} 筆索引`);
+    } catch (err) {
+      console.warn('[FullBackup] 本地索引重建失敗（不影響備份）:', err);
+    }
 
     // ── 手動停止 helper ───────────────────────────────────────────────────────────
     // 清除停止旗標、更新狀態、導回原始頁面
@@ -578,75 +879,71 @@ async function performFullHistoryBackup(limitCount = 0) {
 
       try {
         const convId = stableConvId(conv.url);
-        const storageKey = `hash_${encodeURIComponent(conv.url)}`;
 
         // 先取出已儲存的 hash 和 msg count（不需要等 navigation）
         const stored = await chrome.storage.local.get([
-          storageKey,
-          `chatFilename_${convId}`,
+          `chatHash_${convId}`,
           `chatFolderName_${convId}`,
           `chatMsgCount_${convId}`,
         ]);
 
         const isGemChat = conv.url.includes('/gem/');
-        await navigateAndWait(tabId, conv.url, isGemChat ? 4000 : 2500);
+        await navigateAndWaitRetry(tabId, conv.url, isGemChat ? 4000 : 2500);
 
         // ── Stop check #2：navigate 完成後立即確認（navigate 本身耗時 2~4 秒）──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
           if (s) { await handleStop(); return; } }
 
-        // ── 快速比對：若曾備份過，先數可見訊息數量決定是否需要 scroll ──
-        // scrollToLoadAllMessages 很耗時，盡量跳過
+        // ── 快速比對：若曾備份過，先數可見訊息數量決定是否需要 scroll / 擷取 ──
         const prevMsgCount = stored[`chatMsgCount_${convId}`] || 0;
-        const hasPrevBackup = !!stored[storageKey] && prevMsgCount > 0;
+        const prevHash = stored[`chatHash_${convId}`];
+        // storage 有紀錄還不夠——本地資料夾必須真的存在才能跳過
+        //（使用者手動刪除備份資料夾後，該對話應重新備份而不是永遠被略過）
+        const alreadyFolder = await localBackupExists(
+          dirHandle, stored[`chatFolderName_${convId}`]
+        );
+        const hasPrevBackup = !!prevHash && prevMsgCount > 0;
 
-        let needFullScroll = !hasPrevBackup; // 從未備份過 → 一定要 scroll
-
-        if (hasPrevBackup) {
+        if (hasPrevBackup && alreadyFolder) {
           try {
             const [countResult] = await chrome.scripting.executeScript({
               target: { tabId },
               func: countMessagesOnPage,
+              args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
             });
             const quickCount = countResult?.result || 0;
-            if (quickCount > prevMsgCount) {
-              needFullScroll = true; // 有新訊息，需要 scroll 才能全量擷取
+            if (quickCount > 0 && quickCount <= prevMsgCount) {
+              // 沒有新訊息 → 完全跳過捲動與擷取（真正的快速略過）
+              if (convEntry) convEntry.status = 'skipped';
+              state.skipped++;
+              state.done++;
+              await saveState();
+              await randomDelay(800, 1600);
+              continue;
             }
-            // quickCount <= prevMsgCount → 沒有新訊息，跳過 scroll
-          } catch (_) {
-            needFullScroll = true; // 計數失敗就保守地做完整 scroll
-          }
+          } catch (_) {} // 計數失敗就照常走完整流程
         }
 
         // ── Stop check #3：scroll 前確認（scroll 可能是最耗時的步驟）──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
           if (s) { await handleStop(); return; } }
 
-        if (needFullScroll) {
-          // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
-          // prevMsgCount = 0 表示從未備份，會退回為全量捲動
-          await scrollToLoadAllMessages(tabId, prevMsgCount);
-        }
+        // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
+        // prevMsgCount = 0 表示從未備份，會退回為全量捲動
+        await scrollToLoadAllMessages(tabId, prevMsgCount);
 
         // ── Stop check #4：scroll 完成後、extract 前 ──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
           if (s) { await handleStop(); return; } }
 
-        const results = await chrome.scripting.executeScript({
-          target: { tabId },
-          files: ['content.js'],
-        });
-
-        const data = results?.[0]?.result;
+        const data = await extractConversation(tabId);
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
-          const { content, hash, url, messages, images } = data;
-          const realStorageKey = `hash_${encodeURIComponent(url || conv.url)}`;
+          const { content, hash, messages, images } = data;
 
           // hash 相同且已有資料夾備份 → 略過；只有舊 .md → 繼續遷移
-          const alreadyFolder = !!stored[`chatFolderName_${convId}`];
-          if (stored[storageKey] === hash && alreadyFolder) {
+          if (prevHash === hash && alreadyFolder) {
             if (convEntry) convEntry.status = 'skipped';
             state.skipped++;
             state.done++;
@@ -676,11 +973,10 @@ async function performFullHistoryBackup(limitCount = 0) {
 
           const now = new Date().toISOString();
           const storageUpdate = {
-            [realStorageKey]: hash,
+            [`chatHash_${convId}`]: hash,
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
           };
-          if (saveKeys.filename) storageUpdate[`chatFilename_${convId}`] = saveKeys.filename;
           if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
           await chrome.storage.local.set(storageUpdate);
         }
@@ -712,6 +1008,8 @@ async function performFullHistoryBackup(limitCount = 0) {
     state.inProgress = false;
     state.fatalError = err.message;
     await chrome.storage.local.set({ fullBackupState: state });
+  } finally {
+    stopKeepalive();
   }
 }
 
@@ -757,6 +1055,7 @@ async function performRetryFailedBackup() {
     await chrome.storage.local.set({ fullBackupState: { ...state } });
   }
 
+  startKeepalive();
   try {
     const dirHandle = await getFromDB('directoryHandle');
     if (!dirHandle) {
@@ -809,31 +1108,23 @@ async function performRetryFailedBackup() {
 
       try {
         const convId = stableConvId(target.url);
-        const storageKey = `hash_${encodeURIComponent(target.url)}`;
         const stored = await chrome.storage.local.get([
-          storageKey,
-          `chatFilename_${convId}`,
+          `chatHash_${convId}`,
           `chatFolderName_${convId}`,
           `chatMsgCount_${convId}`,
         ]);
 
         const isGemChat = target.url.includes('/gem/');
-        await navigateAndWait(tabId, target.url, isGemChat ? 4000 : 2500);
+        await navigateAndWaitRetry(tabId, target.url, isGemChat ? 4000 : 2500);
 
         // 重試時不信任舊的 msgCount，做完整 scroll
         await scrollToLoadAllMessages(tabId, 0);
 
-        const results = await chrome.scripting.executeScript({
-          target: { tabId },
-          files: ['content.js'],
-        });
-
-        const data = results?.[0]?.result;
+        const data = await extractConversation(tabId);
         if (!data?.content) {
           if (convEntry) { convEntry.status = 'failed'; convEntry.reason = '無法擷取內容'; }
         } else {
-          const { content, hash, url, messages, images } = data;
-          const realStorageKey = `hash_${encodeURIComponent(url || target.url)}`;
+          const { content, hash, messages, images } = data;
 
           const filenameTitle = target.title || data.title || '未命名對話';
           const safeTitle = filenameTitle.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60).trim() || '未命名對話';
@@ -847,11 +1138,10 @@ async function performRetryFailedBackup() {
           const currMsgCount = messages ? messages.length : 0;
           const now = new Date().toISOString();
           const storageUpdate = {
-            [realStorageKey]: hash,
+            [`chatHash_${convId}`]: hash,
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
           };
-          if (saveKeys.filename) storageUpdate[`chatFilename_${convId}`] = saveKeys.filename;
           if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
           await chrome.storage.local.set(storageUpdate);
         }
@@ -880,6 +1170,8 @@ async function performRetryFailedBackup() {
     state.inProgress = false;
     state.fatalError = err.message;
     await chrome.storage.local.set({ fullBackupState: state });
+  } finally {
+    stopKeepalive();
   }
 }
 
@@ -940,12 +1232,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'getChatSyncStatus') {
     const { url, tabId } = message;
     const convId = stableConvId(url);
-    const storageKey = `hash_${encodeURIComponent(url)}`;
 
     chrome.storage.local.get(
-      [storageKey, `chatSyncTime_${convId}`, `chatMsgCount_${convId}`, 'fullBackupState'],
+      [`chatHash_${convId}`, `chatSyncTime_${convId}`, `chatMsgCount_${convId}`, 'fullBackupState'],
       async (data) => {
-        const isSynced = !!data[storageKey];
+        // chatSyncTime 兼容舊版：升級後 chatHash 尚未寫入前，舊備份仍視為已同步
+        const isSynced = !!(data[`chatHash_${convId}`] || data[`chatSyncTime_${convId}`]);
         const lastSyncTime = data[`chatSyncTime_${convId}`] || null;
         const storedMsgCount = data[`chatMsgCount_${convId}`] || 0;
         const fullState = data.fullBackupState;
@@ -957,6 +1249,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             const [result] = await chrome.scripting.executeScript({
               target: { tabId },
               func: countMessagesOnPage,
+              args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
             });
             const currentCount = result?.result || 0;
             hasNewMessages = currentCount > storedMsgCount;
@@ -971,8 +1264,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // ── 輕量計數函式（注入頁面）────────────────────────────────────────────────────
-// 使用與 content.js 相同的選擇器，快速計算當前頁面訊息總數
-function countMessagesOnPage() {
+// 使用與 content.js 相同的選擇器（由 args 傳入），快速計算當前頁面訊息總數
+function countMessagesOnPage(userSelectors, modelSelectors) {
   function queryShadowAll(root, selector) {
     const results = [];
     const visited = new WeakSet();
@@ -989,16 +1282,6 @@ function countMessagesOnPage() {
     traverse(root);
     return results;
   }
-
-  const userSelectors = [
-    'user-query', '.user-query-content', '.query-content',
-    '[data-message-author-role="user"]', '.human-turn',
-  ];
-  const modelSelectors = [
-    'model-response', '.model-response-text',
-    'response-container .response-content',
-    '[data-message-author-role="model"]', '.ai-response',
-  ];
 
   let userCount = 0;
   for (const sel of userSelectors) {
@@ -1031,4 +1314,24 @@ chrome.runtime.onStartup.addListener(async () => {
   }
   // Clear any leftover stop flag
   await chrome.storage.local.remove('stopBackupRequested');
+});
+
+// 安裝 / 更新時：
+// 1. 重新設定排程（擴充套件更新會清掉 alarms）
+// 2. 清除 v2.1 以前的 URL-based hash 索引（其計算包含備份時間戳，永遠不會命中，
+//    v2.2 起改用 chatHash_[convId] 的穩定內容雜湊）
+chrome.runtime.onInstalled.addListener(async () => {
+  try {
+    const { backupInterval } = await chrome.storage.local.get('backupInterval');
+    if (backupInterval) await setupAlarm(backupInterval);
+
+    const all = await chrome.storage.local.get(null);
+    const legacyKeys = Object.keys(all).filter(k => k.startsWith('hash_'));
+    if (legacyKeys.length) {
+      await chrome.storage.local.remove(legacyKeys);
+      console.log(`[Backup] 已清除 ${legacyKeys.length} 筆舊版 hash 索引`);
+    }
+  } catch (err) {
+    console.warn('[Backup] onInstalled migration error:', err);
+  }
 });

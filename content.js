@@ -23,6 +23,22 @@
     return results;
   }
 
+  // ── 訊息過濾 helpers ──────────────────────────────────────────────────────────
+  // Gemini 的「顯示思路」(model-thoughts) 與 Deep Research 側面板不屬於對話正文
+  const THOUGHTS_SELECTOR = 'model-thoughts, .thoughts-container, .thoughts-content';
+
+  function isInExcludedRegion(el) {
+    return !!el.closest?.('deep-research-immersive-panel');
+  }
+
+  // 同一選擇器可能同時匹配巢狀的父子元素，只保留最外層
+  function filterTopLevel(elements, selector) {
+    return elements.filter(el => {
+      const parent = el.parentElement;
+      return !(parent && parent.closest(selector));
+    });
+  }
+
   // ── 圖片追蹤（跨 htmlToMarkdown 呼叫共用）──────────────────────────────────────
   const imageList = []; // { filename, src, buttonEl? }
   let imgCounter = 0;
@@ -42,7 +58,26 @@
 
       // 忽略隱藏元素和無意義標籤
       if (style && style.display === 'none') return '';
-      if (['script', 'style', 'svg', 'noscript'].includes(tag)) return '';
+      if ([
+        'script', 'style', 'svg', 'noscript', 'mat-icon',
+        // Gemini UI 附屬元件：思考過程、來源引用、朗讀控制等，不屬於對話正文
+        'model-thoughts', 'source-footnote', 'sources-carousel',
+        'sources-carousel-inline', 'source-inline-chip', 'tts-control',
+        'message-actions', 'sensitive-memories-banner',
+      ].includes(tag)) return '';
+      if (node.classList) {
+        if (node.classList.contains('thoughts-container') ||
+            node.classList.contains('thoughts-content')) return '';
+        // KaTeX 數學式：優先取原始 LaTeX，避免 mathml + html 重複輸出
+        if (node.classList.contains('katex-display')) {
+          const tex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
+          if (tex) return `\n$$\n${tex.trim()}\n$$\n`;
+        }
+        if (node.classList.contains('katex')) {
+          const tex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
+          if (tex) return `$${tex.trim()}$`;
+        }
+      }
 
       const inner = () => Array.from(node.childNodes).map(convert).join('');
 
@@ -63,6 +98,12 @@
           const text = inner().trim();
           return text ? `*${text}*` : '';
         }
+        case 'del':
+        case 's':
+        case 'strike': {
+          const text = inner().trim();
+          return text ? `~~${text}~~` : '';
+        }
         case 'p': return `\n${inner()}\n`;
         case 'br': return '\n';
         case 'hr': return '\n---\n';
@@ -79,14 +120,14 @@
         case 'ul': {
           const items = Array.from(node.children)
             .filter(c => c.tagName === 'LI')
-            .map(li => `- ${convert(li).trim()}`)
+            .map(li => renderListItem(li, '- '))
             .join('\n');
           return `\n${items}\n`;
         }
         case 'ol': {
           const items = Array.from(node.children)
             .filter(c => c.tagName === 'LI')
-            .map((li, i) => `${i + 1}. ${convert(li).trim()}`)
+            .map((li, i) => renderListItem(li, `${i + 1}. `))
             .join('\n');
           return `\n${items}\n`;
         }
@@ -144,6 +185,15 @@
       }
     }
 
+    // 巢狀清單：li 內含子清單時，第一行掛清單標記，其餘行縮排兩格
+    function renderListItem(li, marker) {
+      const lines = convert(li).trim().split('\n');
+      const first = `${marker}${lines[0]}`;
+      if (lines.length === 1) return first;
+      const rest = lines.slice(1).map(l => (l ? `  ${l}` : l)).join('\n');
+      return `${first}\n${rest}`;
+    }
+
     return convert(rootEl)
       .replace(/\n{3,}/g, '\n\n')
       .trim();
@@ -152,11 +202,16 @@
   // ── Gemini UI 冗餘標籤清除 ────────────────────────────────────────────────────
   // 「你說了」可能出現在圖片 ref 後面（圖片在 DOM 前面），用全域 replace
   function cleanUserMd(md) {
-    return md.replace(/你說了[\s\n]+/g, '').trim();
+    return md
+      .replace(/你說了[\s\n]+/g, '')
+      .replace(/^You said[\s\n]+/g, '')
+      .trim();
   }
 
   function cleanModelMd(md) {
-    return md.replace(/^(##\s*)?Gemini\s*說了[\s\n]+/, '').trim();
+    return md
+      .replace(/^(##\s*)?Gemini\s*(說了|said)[\s\n]+/, '')
+      .trim();
   }
 
   // ── 簡單雜湊（用於增量備份偵測）────────────────────────────────────────────────
@@ -166,6 +221,12 @@
       hash = Math.imul(31, hash) + str.charCodeAt(i) | 0;
     }
     return (hash >>> 0).toString(16);
+  }
+
+  // 穩定內容雜湊：只根據訊息本文計算，不含備份時間戳與圖片檔名，
+  // 同一對話內容在不同時間備份會得到相同 hash，增量偵測才能真正生效。
+  function stableContentHash(messages) {
+    return simpleHash(messages.map(m => `${m.role} ${m.markdown}`).join(''));
   }
 
   // ── 擷取對話標題 ──────────────────────────────────────────────────────────────
@@ -197,20 +258,31 @@
   }
 
   // ── 擷取訊息清單 ──────────────────────────────────────────────────────────────
+  // 選擇器同步自目前 Gemini DOM（參考 gemini-voyager 持續維護的清單），
+  // 舊版選擇器保留在後面作為 fallback。
   function findMessages() {
     const userSelectors = [
       'user-query',
+      '.user-query-bubble-with-background',
+      '.user-query-bubble-container',
+      '.user-query-container',
       '.user-query-content',
       '.query-content',
+      'div[aria-label="User message"]',
+      'article[data-turn="user"]',
       '[data-message-author-role="user"]',
       '.human-turn',
     ];
 
     const modelSelectors = [
       'model-response',
+      '[aria-label="Gemini response"]',
       '.model-response-text',
       'response-container .response-content',
+      '.presented-response-container',
+      'article[data-turn="model"]',
       '[data-message-author-role="model"]',
+      '[data-message-author-role="assistant"]',
       '.ai-response',
     ];
 
@@ -218,11 +290,15 @@
     let modelEls = [];
 
     for (const sel of userSelectors) {
-      const found = queryShadowAll(document, sel);
+      const found = filterTopLevel(
+        queryShadowAll(document, sel).filter(el => !isInExcludedRegion(el)), sel
+      );
       if (found.length) { userEls = found; break; }
     }
     for (const sel of modelSelectors) {
-      const found = queryShadowAll(document, sel);
+      const found = filterTopLevel(
+        queryShadowAll(document, sel).filter(el => !isInExcludedRegion(el)), sel
+      );
       if (found.length) { modelEls = found; break; }
     }
 
@@ -242,6 +318,108 @@
     }
 
     return { userEls, modelEls };
+  }
+
+  // 模型回覆的正文容器：優先取 message-content / .markdown（排除思考過程），
+  // 找不到才退回整個回覆元素。
+  function pickModelContentRoot(modelEl) {
+    function outsideThoughts(sel) {
+      const candidates = modelEl.querySelectorAll?.(sel) || [];
+      for (const c of candidates) {
+        if (!c.closest(THOUGHTS_SELECTOR)) return c;
+      }
+      return null;
+    }
+    return outsideThoughts('message-content')
+        || outsideThoughts('.markdown, .markdown-main-panel')
+        || outsideThoughts('.response-content')
+        || modelEl;
+  }
+
+  // ── 官方複製擷取（Gemini 官方導出格式）─────────────────────────────────────────
+  // background.js 已在 MAIN world 注入 clipboard bridge（攔截 navigator.clipboard），
+  // 點擊 Gemini 官方的「複製回覆」按鈕時，官方生成的 markdown 會被 bridge 捕捉、
+  // 不會寫入使用者真正的剪貼簿。取得的內容比 DOM 轉換更貼近原始格式。
+  // 找不到按鈕或連續失敗時自動退回 DOM 轉換，不影響備份。
+  let officialCopyStrikes = 0;
+
+  // 點擊複製按鈕時 Gemini 會跳出「已複製到剪貼簿」snackbar；
+  // 備份期間暫時隱藏，結束後移除樣式恢復正常。
+  function suppressCopyToast() {
+    if (document.getElementById('__gcb-hide-toast')) return;
+    const style = document.createElement('style');
+    style.id = '__gcb-hide-toast';
+    style.textContent = `
+      .cdk-overlay-container .mat-mdc-snack-bar-container,
+      .cdk-overlay-container .mat-snack-bar-container,
+      .cdk-overlay-container snack-bar-container,
+      .cdk-overlay-container simple-snack-bar,
+      .cdk-overlay-container message-snackbar {
+        display: none !important;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function restoreCopyToast() {
+    document.getElementById('__gcb-hide-toast')?.remove();
+  }
+
+  // 注意：必須排除程式碼區塊的「複製程式碼」按鈕（在 code-block / pre 內），
+  // 誤抓會導致整則回覆被替換成單一程式碼片段。
+  function isCodeBlockButton(btn) {
+    return !!btn.closest('code-block, pre, .code-block');
+  }
+
+  function findCopyButton(modelEl) {
+    const container = modelEl.closest?.(
+      'response-container, .response-container, .presented-response-container'
+    ) || modelEl;
+    const directCandidates = Array.from(container.querySelectorAll?.(
+      '[data-test-id="copy-button"] button, button[data-test-id="copy-button"], [data-test-id="copy-button"]'
+    ) || []);
+    const direct = directCandidates.find(b => !isCodeBlockButton(b));
+    if (direct) return direct;
+    // aria-label 必須同時含「複製」與「回覆/回應」語意，避免抓到其他複製按鈕
+    const byLabel = Array.from(container.querySelectorAll?.('button[aria-label]') || [])
+      .find(b => {
+        if (isCodeBlockButton(b)) return false;
+        const label = b.getAttribute('aria-label') || '';
+        return /copy response|copy answer|複製回覆|複製回應|复制回复|回答をコピー|回覆/i.test(label) ||
+               (/copy|複製|复制/i.test(label) && /response|answer|回覆|回應|回复|回答/i.test(label));
+      });
+    return byLabel || null;
+  }
+
+  async function harvestOfficialMarkdown(modelEl) {
+    if (officialCopyStrikes >= 2) return null;
+    const bridge = document.getElementById('__gcb-clip-bridge');
+    if (!bridge) return null;
+    const btn = findCopyButton(modelEl);
+    if (!btn) return null;
+
+    const prevSeq = bridge.getAttribute('data-seq') || '0';
+    bridge.setAttribute('data-capture', '1');
+    suppressCopyToast();
+    try {
+      btn.click();
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 50));
+        if ((bridge.getAttribute('data-seq') || '0') !== prevSeq) {
+          const text = (bridge.textContent || '').trim();
+          if (text) return text;
+          break;
+        }
+      }
+      officialCopyStrikes++;
+      return null;
+    } catch (_) {
+      officialCopyStrikes++;
+      return null;
+    } finally {
+      bridge.setAttribute('data-capture', '0');
+    }
   }
 
   // ── 燈箱操作：點擊圖片預覽按鈕，取得原始圖 URL 與原始檔名 ─────────────────────────
@@ -306,25 +484,46 @@
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 
+  // 先建立訊息清單（模型回覆優先嘗試官方複製，失敗退回 DOM 轉換）
+  const messages = [];
+  const maxLen = Math.max(userEls.length, modelEls.length);
+  try {
+    for (let i = 0; i < maxLen; i++) {
+      if (i < userEls.length) {
+        const userMd = cleanUserMd(htmlToMarkdown(userEls[i]));
+        messages.push({ role: 'user', markdown: userMd });
+      }
+      if (i < modelEls.length) {
+        const domMd = cleanModelMd(htmlToMarkdown(pickModelContentRoot(modelEls[i])));
+        let modelMd = domMd;
+        // 只有在 DOM 版本不含圖片參照時才可安全替換為官方複製內容
+        // （官方複製是純文字，換掉會遺失圖片連結）
+        if (!domMd.includes('](media/')) {
+          const official = await harvestOfficialMarkdown(modelEls[i]);
+          if (official) modelMd = official;
+        }
+        messages.push({ role: 'model', markdown: modelMd });
+      }
+    }
+  } finally {
+    restoreCopyToast(); // 備份結束（或中途出錯）都要恢復 snackbar 顯示
+  }
+
+  // 組裝 Markdown 全文
   let md = `# ${title}\n\n`;
   md += `> **備份時間：** ${backupTime}  \n`;
   md += `> **對話連結：** ${conversationUrl}\n\n`;
   md += '---\n\n';
 
-  const messages = [];
-  const maxLen = Math.max(userEls.length, modelEls.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (i < userEls.length) {
-      const userMd = cleanUserMd(htmlToMarkdown(userEls[i]));
-      messages.push({ role: 'user', markdown: userMd });
-      md += `## 使用者\n\n${userMd}\n\n`;
+  let turnIndex = 0;
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      if (turnIndex > 0) md += '---\n\n';
+      md += `## 使用者\n\n${msg.markdown}\n\n`;
+      turnIndex++;
+    } else {
+      md += `## Gemini\n\n${msg.markdown}\n\n`;
     }
-    if (i < modelEls.length) {
-      const modelMd = cleanModelMd(htmlToMarkdown(modelEls[i]));
-      messages.push({ role: 'model', markdown: modelMd });
-      md += `## Gemini\n\n${modelMd}\n\n`;
-    }
-    if (i < maxLen - 1) md += '---\n\n';
   }
 
   // ── 圖片下載（兩階段）────────────────────────────────────────────────────────
@@ -386,10 +585,18 @@
     })
   )).filter(Boolean);
 
+  // ── 穩定 hash 與檔內 meta 註記 ─────────────────────────────────────────────────
+  // meta 註記寫在檔尾，讓 background.js 之後可以直接從備份資料夾重建索引
+  //（例如擴充套件重裝、chrome.storage 被清除後，仍能正確做增量判斷）。
+  const hash = stableContentHash(messages);
+  const chatIdMatch = conversationUrl.match(/\/app\/([a-zA-Z0-9_-]+)/);
+  const metaId = chatIdMatch ? chatIdMatch[1] : '';
+  md += `\n<!-- gemini-backup:v1 hash=${hash} msgs=${messages.length} id=${metaId} -->\n`;
+
   return {
     title,
     content: md,
-    hash: simpleHash(md),
+    hash,
     url: conversationUrl,
     messages,
     images: fetchedImages, // [{ filename, dataUrl }]
