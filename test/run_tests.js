@@ -494,6 +494,50 @@ test('僅比對尾端 400 字', () => tailSig('q', longA) === tailSig('q', longB
 test('尾端 400 字內有差異會被偵測',
   () => tailSig('q', 'Z'.repeat(600) + 'T'.repeat(399) + 'U') !== tailSig('q', longA));
 
+// ── Test 13: 備份範圍（預設值 + 自訂數量）──────────────────────────────────
+print('\n【T13】備份範圍設定');
+
+const LIMIT_PRESETS = [0, 5, 10, 20, 30, 50, 100];
+const LIMIT_MAX = 9999;
+
+// 對照 popup.js 的 getLimitCount：select 值 + 自訂輸入 → 實際數量
+function getLimitCount(selectValue, customValue) {
+  if (selectValue !== 'custom') return Number(selectValue) || 0;
+  const n = Math.floor(Number(customValue));
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(n, LIMIT_MAX);
+}
+
+assertEqual('預設「全部」→ 0', getLimitCount('0', '100'), 0);
+assertEqual('預設「前 30 個」→ 30', getLimitCount('30', '100'), 30);
+assertEqual('自訂 250 → 250', getLimitCount('custom', '250'), 250);
+assertEqual('自訂小數無條件捨去', getLimitCount('custom', '42.9'), 42);
+assertEqual('自訂超過上限夾回 9999', getLimitCount('custom', '99999'), LIMIT_MAX);
+assertEqual('自訂空白 → 0（全部）', getLimitCount('custom', ''), 0);
+assertEqual('自訂非數字 → 0（全部）', getLimitCount('custom', 'abc'), 0);
+assertEqual('自訂 0 → 0（全部）', getLimitCount('custom', '0'), 0);
+assertEqual('自訂負數 → 0（全部）', getLimitCount('custom', '-5'), 0);
+test('回傳值永遠是數字', () =>
+  [['custom','abc'], ['custom',''], ['0','1'], ['100','1']]
+    .every(([a, b]) => Number.isFinite(getLimitCount(a, b))));
+
+// 對照 popup.js 的 applyLimitToUI：儲存的數字 → 還原成哪個 UI 狀態
+function applyLimitToUI(value) {
+  const n = Number(value) || 0;
+  if (LIMIT_PRESETS.includes(n)) return { select: String(n), custom: null };
+  return { select: 'custom', custom: String(Math.min(Math.max(Math.floor(n), 1), LIMIT_MAX)) };
+}
+
+assertEqual('還原 30 → 選預設', applyLimitToUI(30).select, '30');
+assertEqual('還原 0 → 選全部', applyLimitToUI(0).select, '0');
+assertEqual('還原 250 → 進自訂', applyLimitToUI(250).select, 'custom');
+assertEqual('還原 250 → 填入 250', applyLimitToUI(250).custom, '250');
+// 存進去什麼、還原後就該算出什麼
+test('存取往返一致', () => [0, 5, 30, 100, 250, 1000].every(n => {
+  const ui = applyLimitToUI(n);
+  return getLimitCount(ui.select, ui.custom) === n;
+}));
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 print('\n══════════════════════════════════════════');
 const total = passed + failed;

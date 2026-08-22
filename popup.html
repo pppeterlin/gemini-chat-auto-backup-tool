@@ -231,6 +231,24 @@
       min-width: 130px;
       transition: border-color 0.15s, box-shadow 0.15s;
     }
+    /* 自訂備份數量的輸入框：外觀對齊同一列的 select */
+    #full-backup-limit-custom {
+      padding: 7px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      color: var(--ink);
+      background: var(--card);
+      outline: none;
+      min-width: 130px;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    #full-backup-limit-custom:hover { border-color: var(--ink-muted); }
+    #full-backup-limit-custom:focus {
+      border-color: var(--coral);
+      box-shadow: 0 0 0 3px var(--coral-tint);
+    }
     select:hover { border-color: var(--ink-muted); }
     select:focus {
       border-color: var(--coral);
@@ -538,7 +556,13 @@
             <option value="30">前 30 個</option>
             <option value="50">前 50 個</option>
             <option value="100">前 100 個</option>
+            <option value="custom">自訂…</option>
           </select>
+        </div>
+        <div class="history-row" id="full-backup-custom-row" style="display:none;">
+          <label class="row-label" for="full-backup-limit-custom">自訂數量</label>
+          <input type="number" id="full-backup-limit-custom"
+                 min="1" max="9999" step="1" value="100" inputmode="numeric">
         </div>
         <button id="btn-full-backup" class="btn btn-outline" style="margin-top: 8px;">
           同步所有歷史

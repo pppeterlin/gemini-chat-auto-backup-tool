@@ -883,7 +883,10 @@ const SIDEBAR_WALL_TIMEOUT_MS = 8 * 60000;
 
 // 在頁面內執行一個「切片」：捲動數輪並回報進度。
 // 跨切片的狀態掛在 window.__gcbSidebarScan，由 driver 先行重置。
-async function sidebarScanSlice(rounds, stableTarget) {
+// targetNonPinned > 0 時，非釘選對話載滿這個數量就提早收工 —— 選「前 N 個」
+// 不需要把全部 500+ 個對話都捲出來（實測全捲要 36 輪 / 約 2 分鐘，
+// 只要前 100 個約 6 輪就夠）。0 = 載入全部。
+async function sidebarScanSlice(rounds, stableTarget, targetNonPinned) {
   const wait = ms => new Promise(r => setTimeout(r, ms));
   const aborted = () => !!window.__geminiBackupAborted;
 
@@ -986,9 +989,27 @@ async function sidebarScanSlice(rounds, stableTarget) {
     );
   }
 
+  // 釘選數量（釘選項目一律排在最前面，且永遠全部備份，不計入 N）
+  function countPinned() {
+    const root = sidenav() || document;
+    return root.querySelectorAll(
+      '.trailing-icon-container [data-mat-icon-name="push_pin"]'
+    ).length;
+  }
+
+  // 已載入的非釘選對話是否已滿足需求
+  function reachedTarget() {
+    if (!targetNonPinned || targetNonPinned <= 0) return false;
+    return countItems() - countPinned() >= targetNonPinned;
+  }
+
   if (aborted()) return { aborted: true, count: countItems(), rounds: st.rounds };
 
   if (ensureChatsExpanded()) await wait(600);
+
+  if (reachedTarget()) {
+    return { scrollerFound: true, done: true, count: countItems(), rounds: st.rounds, target: true };
+  }
 
   const sc = findScrollEl();
   window.__gcbSidebarScrollEl = sc; // driver 結束時用來捲回頂端
@@ -1025,6 +1046,9 @@ async function sidebarScanSlice(rounds, stableTarget) {
       st.stable++;
     }
 
+    if (reachedTarget()) {
+      return { scrollerFound: true, done: true, count: n, rounds: st.rounds, target: true };
+    }
     if (st.stable >= stableTarget && atBottom && !isLoadingMore()) {
       return { scrollerFound: true, done: true, count: n, rounds: st.rounds, atBottom };
     }
@@ -1041,7 +1065,7 @@ async function sidebarScanSlice(rounds, stableTarget) {
 
 // driver：分批注入 sidebarScanSlice，切片之間檢查停止旗標並回報進度。
 // onProgress(count) 由呼叫端用來更新 UI。
-async function scrollSidebarToLoadAll(tabId, onProgress) {
+async function scrollSidebarToLoadAll(tabId, onProgress, targetNonPinned = 0) {
   const started = Date.now();
   let last = { count: 0, rounds: 0 };
 
@@ -1063,7 +1087,7 @@ async function scrollSidebarToLoadAll(tabId, onProgress) {
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         func: sidebarScanSlice,
-        args: [SIDEBAR_SLICE_ROUNDS, SIDEBAR_STABLE_ROUNDS],
+        args: [SIDEBAR_SLICE_ROUNDS, SIDEBAR_STABLE_ROUNDS, targetNonPinned],
       });
       r = res?.result;
     } catch (err) {
@@ -1214,7 +1238,7 @@ async function performFullHistoryBackup(limitCount = 0) {
       scanResult = await scrollSidebarToLoadAll(tabId, async (count) => {
         state.scanCount = count;
         await saveState();
-      });
+      }, limitCount);
     } catch (_) {} // Non-fatal — scan whatever is visible if this fails
 
     // 載入 500+ 對話可能要好幾分鐘，期間按停止要能立刻收工

@@ -322,11 +322,21 @@ async function init() {
 
   // 還原全量備份範圍設定
   const { fullBackupLimit } = await chrome.storage.local.get('fullBackupLimit');
-  const limitSelectEl = document.getElementById('full-backup-limit');
-  if (fullBackupLimit !== undefined) {
-    limitSelectEl.value = String(fullBackupLimit);
-  }
-  limitSelectEl.addEventListener('change', updateFullBackupBtnText);
+  applyLimitToUI(fullBackupLimit !== undefined ? fullBackupLimit : 0);
+
+  const { select: limitSelectEl, custom: limitCustomEl } = limitEls();
+  limitSelectEl.addEventListener('change', () => {
+    syncCustomRowVisibility();
+    if (limitSelectEl.value === 'custom') limitCustomEl.focus();
+    updateFullBackupBtnText();
+  });
+  limitCustomEl.addEventListener('input', updateFullBackupBtnText);
+  // 失焦時把超出範圍的輸入夾回合法值，避免按鈕顯示和實際執行的數字不一致
+  limitCustomEl.addEventListener('blur', () => {
+    const n = getLimitCount();
+    if (n > 0) limitCustomEl.value = String(n);
+    updateFullBackupBtnText();
+  });
 
   // 上次備份時間
   document.getElementById('last-backup-time').textContent =
@@ -444,11 +454,53 @@ async function selectLanguage(lang) {
   document.getElementById('lang-dropdown').classList.remove('show');
 }
 
+// ── 備份範圍（下拉預設值 + 自訂數量）────────────────────────────────────────
+// 下拉選到「自訂…」時才顯示數字輸入框，其餘情況沿用預設值。
+// 對外一律用一個數字表示：0 = 全部，> 0 = 前 N 個（不含 Pinned，Pinned 永遠全備份）。
+
+const LIMIT_PRESETS = [0, 5, 10, 20, 30, 50, 100];
+const LIMIT_MAX = 9999;
+
+function limitEls() {
+  return {
+    select: document.getElementById('full-backup-limit'),
+    custom: document.getElementById('full-backup-limit-custom'),
+    row: document.getElementById('full-backup-custom-row'),
+  };
+}
+
+// 目前設定的備份數量。自訂欄位空白或不合法時退回 0（全部），不讓 NaN 外流。
+function getLimitCount() {
+  const { select, custom } = limitEls();
+  if (select.value !== 'custom') return Number(select.value) || 0;
+  const n = Math.floor(Number(custom.value));
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(n, LIMIT_MAX);
+}
+
+// 把儲存的數字還原成 UI 狀態：不是預設值的一律進「自訂…」
+function applyLimitToUI(value) {
+  const { select, custom } = limitEls();
+  const n = Number(value) || 0;
+  if (LIMIT_PRESETS.includes(n)) {
+    select.value = String(n);
+  } else {
+    select.value = 'custom';
+    custom.value = String(Math.min(Math.max(Math.floor(n), 1), LIMIT_MAX));
+  }
+  syncCustomRowVisibility();
+}
+
+function syncCustomRowVisibility() {
+  const { select, row } = limitEls();
+  row.style.display = select.value === 'custom' ? '' : 'none';
+}
+
 // 根據目前選取的備份範圍，更新「同步」按鈕文字
 function updateFullBackupBtnText() {
   const btn = document.getElementById('btn-full-backup');
   if (btn.disabled) return; // 備份進行中，不覆蓋 loading 文字
-  const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
+  const limitCount = getLimitCount();
   if (limitCount === 0) {
     btn.textContent = i18nText('syncAll');
   } else {
@@ -496,10 +548,15 @@ function updateUIText() {
   const limitSelect = document.getElementById('full-backup-limit');
   limitSelect.querySelector('option[value="0"]').textContent = i18nText('limitAll');
   // 選項在 popup.html 增減時這裡不用再跟著改
-  for (const n of [5, 10, 20, 30, 50, 100]) {
+  for (const n of LIMIT_PRESETS) {
+    if (n === 0) continue;
     const opt = limitSelect.querySelector(`option[value="${n}"]`);
     if (opt) opt.textContent = i18nText(`limitTop${n}`);
   }
+  const customOpt = limitSelect.querySelector('option[value="custom"]');
+  if (customOpt) customOpt.textContent = i18nText('limitCustom');
+  const customLabel = document.querySelector('label[for="full-backup-limit-custom"]');
+  if (customLabel) customLabel.textContent = i18nText('limitCustomLabel');
 
   updateFullBackupBtnText();
 
@@ -640,7 +697,7 @@ document.getElementById('btn-full-backup').addEventListener('click', async () =>
   showStatus('已開始同步所有歷史，請勿關閉 Gemini 分頁', 'info');
   setTimeout(clearStatus, 4000);
 
-  const limitCount = Number(document.getElementById('full-backup-limit').value) || 0;
+  const limitCount = getLimitCount();
   await chrome.storage.local.set({ fullBackupLimit: limitCount });
   await chrome.runtime.sendMessage({ action: 'startFullBackup', limitCount });
 });
