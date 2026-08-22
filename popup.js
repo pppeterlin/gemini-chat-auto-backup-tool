@@ -203,7 +203,9 @@ function updateFullBackupUI(state) {
     renderFailedList([], []);
 
     if (state.total === 0) {
-      progressText.textContent = i18nText('scanning');
+      // 側邊欄要捲很多輪才能把 500+ 個對話載進 DOM，顯示已載入數量避免看起來像卡住
+      const scanned = state.scanCount > 0 ? ` (${state.scanCount})` : '';
+      progressText.textContent = `${i18nText('scanning')}${scanned}`;
       progressBar.style.width = '0%';
     } else {
       const pct = Math.round((state.done / state.total) * 100);

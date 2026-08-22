@@ -442,6 +442,58 @@ const folderName = '學習筆記_Part_2_abc123';
 test('資料夾後綴匹配 convId', () => folderName.endsWith('_abc123'));
 test('不匹配其他 convId', () => !folderName.endsWith('_def456'));
 
+// ── Test 11: Voyager jslog metadata 解析 ────────────────────────────────────
+print('\n【T11】Voyager jslog metadata（釘選狀態與清單順序）');
+
+// 2026-08 於 Gemini Voyager 實測到的真實 jslog 字串
+function extractMetaFromJslog(value) {
+  const match = String(value || '').match(
+    /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*\]/
+  );
+  if (!match) return null;
+  return { pinned: match[1] === '1', index: Number(match[2]) };
+}
+
+const pinnedJslog =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  '[null,null,null,null,null,null,null,["c_5c20a79185935ade",null,1,0]];mutable:true';
+const plainJslog =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  '[null,null,null,null,null,null,null,["c_c6c6e6d95b3ce14a",null,0,532]];mutable:true';
+
+test('釘選項目 pinned=true', () => extractMetaFromJslog(pinnedJslog).pinned === true);
+assertEqual('釘選項目 index', extractMetaFromJslog(pinnedJslog).index, 0);
+test('一般項目 pinned=false', () => extractMetaFromJslog(plainJslog).pinned === false);
+assertEqual('一般項目 index', extractMetaFromJslog(plainJslog).index, 532);
+test('格式不符回傳 null', () => extractMetaFromJslog('186014;track:generic_click') === null);
+
+// jslog 內另有 "generic_click"，chatId 抽取必須帶 \b 才不會誤抓成 "lick"
+assertEqual('chatId 不被 generic_click 汙染',
+  extractChatIdFromJslog(pinnedJslog), '5c20a79185935ade');
+
+// ── Test 12: 尾端指紋 ───────────────────────────────────────────────────────
+print('\n【T12】對話尾端指紋（增量備份判斷）');
+
+function tailSig(userTail, modelTail) {
+  const raw = `${String(userTail).slice(-400)}\u0000${String(modelTail).slice(-400)}`;
+  let h = 5381;
+  for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0;
+  return raw ? `${raw.length}:${(h >>> 0).toString(36)}` : '';
+}
+
+const sigA = tailSig('幫我翻譯', 'Here is the translation.');
+test('相同尾端 → 指紋相同', () => sigA === tailSig('幫我翻譯', 'Here is the translation.'));
+test('模型回覆變了 → 指紋不同', () => sigA !== tailSig('幫我翻譯', 'Here is the translation!'));
+test('新增使用者訊息 → 指紋不同', () => sigA !== tailSig('再翻一次', 'Here is the translation.'));
+test('指紋為非空字串', () => typeof sigA === 'string' && sigA.length > 0);
+// 只取尾端 400 字：開頭不同但最後 400 字相同的長訊息會視為同一則
+const longA = 'X'.repeat(600) + 'T'.repeat(400);
+const longB = 'Y'.repeat(600) + 'T'.repeat(400);
+test('僅比對尾端 400 字', () => tailSig('q', longA) === tailSig('q', longB));
+// 但尾端 400 字內有差異就必須測得出來
+test('尾端 400 字內有差異會被偵測',
+  () => tailSig('q', 'Z'.repeat(600) + 'T'.repeat(399) + 'U') !== tailSig('q', longA));
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 print('\n══════════════════════════════════════════');
 const total = passed + failed;
