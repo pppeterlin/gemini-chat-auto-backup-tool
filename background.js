@@ -251,12 +251,15 @@ async function extractConversation(tabId) {
 //   4. 連續 2 圈無新內容（中間 backoff 重試）→ 歷史已完整載入
 //   5. 使用者按「停止」→ window.__geminiBackupAborted 旗標，任何等待中立即返回
 //
-// stopAtCount: 0 = 載入全部歷史（預設）
-//              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止
-async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
+// 一律載入完整歷史。曾經有個 stopAtCount 參數（載到上次備份的訊息數就停），
+// 但那是錯的：Gemini 是「從最新往回」載入，載到 prevMsgCount 拿到的是
+// 最新的 prevMsgCount 則，而備份檔是整份覆寫的 —— 對話新增 N 則之後，
+// 寫回去的檔案就會少掉最舊的 N 則。要完整備份就得真的捲到最舊。
+// 「沒有新訊息就完全不捲」由呼叫端的尾端指紋負責，不靠這裡提前收工。
+async function scrollToLoadAllMessages(tabId) {
   const run = () => chrome.scripting.executeScript({
     target: { tabId },
-    func: async (stopAtCount, userSelectors, modelSelectors) => {
+    func: async (userSelectors, modelSelectors) => {
       const MAX_ITERATIONS = 80;             // 每圈約載入 10–20 則 → 支援 800+ 則長對話
       const WALL_TIMEOUT_MS = 5 * 60000;     // 整體上限 5 分鐘，避免無限卡住
       const PROGRESS_TIMEOUT_MS = 8000;      // 每圈最多等 8 秒看是否有新內容
@@ -434,13 +437,6 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
 
       expandAllCollapsed();
 
-      // 已載入足夠數量 → 直接回到底部
-      if (stopAtCount > 0 && countTurns() >= stopAtCount) {
-        const el = getScrollEl();
-        if (el) el.scrollTop = el.scrollHeight;
-        return;
-      }
-
       const startTime = Date.now();
       let noProgress = 0;
       let clickTried = false;
@@ -473,7 +469,6 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         if (changed) {
           noProgress = 0;
           clickTried = false;
-          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
           await wait(250);
           continue;
         }
@@ -510,7 +505,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       window.scrollTo(0, document.body.scrollHeight);
       await wait(400);
     },
-    args: [stopAtCount, USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
+    args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
   });
 
   try {
@@ -727,9 +722,8 @@ async function seedStorageFromLocalBackups(dirHandle, convs) {
 // ── Single-conversation backup ─────────────────────────────────────────────────
 
 async function backupSingleTab(tab, dirHandle) {
-  // 先取得上次備份的訊息數，再決定捲動深度。
-  // 若已備份過（prevMsgCount > 0），捲到 prevMsgCount 即可停止——
-  // 新訊息已在頁面底部，舊訊息捲回到 prevMsgCount 後 DOM 即包含完整內容。
+  // 取出上次備份的訊息數，作為存檔前的回退保護：
+  // 這次載到的訊息比上次少 → 代表捲動沒完成，寧可保留舊備份也不要覆寫成殘缺版。
   const convId = stableConvId(tab.url);
   const preStored = await chrome.storage.local.get([
     `chatHash_${convId}`,
@@ -751,7 +745,7 @@ async function backupSingleTab(tab, dirHandle) {
     }
   }
 
-  await scrollToLoadAllMessages(tab.id, prevMsgCount);
+  await scrollToLoadAllMessages(tab.id);
 
   const data = await extractConversation(tab.id);
   if (!data || !data.content) {
@@ -1377,9 +1371,9 @@ async function performFullHistoryBackup(limitCount = 0) {
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
           if (s) { await handleStop(); return; } }
 
-        // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
-        // prevMsgCount = 0 表示從未備份，會退回為全量捲動
-        await scrollToLoadAllMessages(tabId, prevMsgCount);
+        // 走到這裡代表尾端指紋不同（或還沒有指紋）＝ 內容真的變了。
+        // 備份檔是整份覆寫，所以必須載入完整歷史，不能只補新的部分。
+        await scrollToLoadAllMessages(tabId);
 
         // ── Stop check #4：scroll 完成後、extract 前 ──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
@@ -1579,7 +1573,7 @@ async function performRetryFailedBackup() {
         await navigateAndWaitRetry(tabId, target.url, isGemChat ? 4000 : 2500);
 
         // 重試時不信任舊的 msgCount，做完整 scroll
-        await scrollToLoadAllMessages(tabId, 0);
+        await scrollToLoadAllMessages(tabId);
 
         const data = await extractConversation(tabId);
 
