@@ -495,10 +495,11 @@ function updateUIText() {
   if (limitLabel) limitLabel.textContent = i18nText('backupLimit');
   const limitSelect = document.getElementById('full-backup-limit');
   limitSelect.querySelector('option[value="0"]').textContent = i18nText('limitAll');
-  limitSelect.querySelector('option[value="5"]').textContent = i18nText('limitTop5');
-  limitSelect.querySelector('option[value="10"]').textContent = i18nText('limitTop10');
-  limitSelect.querySelector('option[value="20"]').textContent = i18nText('limitTop20');
-  limitSelect.querySelector('option[value="30"]').textContent = i18nText('limitTop30');
+  // 選項在 popup.html 增減時這裡不用再跟著改
+  for (const n of [5, 10, 20, 30, 50, 100]) {
+    const opt = limitSelect.querySelector(`option[value="${n}"]`);
+    if (opt) opt.textContent = i18nText(`limitTop${n}`);
+  }
 
   updateFullBackupBtnText();
 
