@@ -251,15 +251,22 @@ async function extractConversation(tabId) {
 //   4. 連續 2 圈無新內容（中間 backoff 重試）→ 歷史已完整載入
 //   5. 使用者按「停止」→ window.__geminiBackupAborted 旗標，任何等待中立即返回
 //
-// stopAtCount: 0 = 載入全部歷史（預設）
-//              > 0 = 當 DOM 訊息數 >= stopAtCount 時提前停止
-async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
+// 一律載入完整歷史。曾經有個 stopAtCount 參數（載到上次備份的訊息數就停），
+// 但那是錯的：Gemini 是「從最新往回」載入，載到 prevMsgCount 拿到的是
+// 最新的 prevMsgCount 則，而備份檔是整份覆寫的 —— 對話新增 N 則之後，
+// 寫回去的檔案就會少掉最舊的 N 則。要完整備份就得真的捲到最舊。
+// 「沒有新訊息就完全不捲」由呼叫端的尾端指紋負責，不靠這裡提前收工。
+async function scrollToLoadAllMessages(tabId) {
   const run = () => chrome.scripting.executeScript({
     target: { tabId },
-    func: async (stopAtCount, userSelectors, modelSelectors) => {
+    func: async (userSelectors, modelSelectors) => {
       const MAX_ITERATIONS = 80;             // 每圈約載入 10–20 則 → 支援 800+ 則長對話
       const WALL_TIMEOUT_MS = 5 * 60000;     // 整體上限 5 分鐘，避免無限卡住
       const PROGRESS_TIMEOUT_MS = 8000;      // 每圈最多等 8 秒看是否有新內容
+      // 確認回合用較短的逾時：實測一批歷史約 1.2 秒就載入完，
+      // 走到確認階段代表多半已經到頂，沒必要每次都空等滿 8 秒。
+      // 每個對話結尾可省下約 9 秒 —— 500+ 對話的全量備份差距超過一小時。
+      const CONFIRM_TIMEOUT_MS = 3500;
       const SPINNER_FINISH_WAIT_MS = 10000;  // 看到 spinner 後等它消失的上限
       const STABILITY_RETRIES = 2;           // 連續 N 圈無進度才視為「真的到頂」
       const RETRY_BACKOFF_MS = 1500;         // 無進度後的喘息時間
@@ -332,9 +339,13 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       }
 
       // Gemini 內建 spinner — 抓更早歷史時顯示。判斷實際可見而非僅存在 DOM。
+      // 2026-08 實測：舊的 loading-history-spinner / .loading-history-spinner-container
+      // 在 Voyager 已不存在（querySelectorAll 全部 0 筆），現行 class 是
+      // .loading-content-spinner-container，漏掉它等於整段 spinner 偵測是死碼。
       function isSpinnerVisible() {
         const candidates = document.querySelectorAll(
           '[data-test-id="loading-history-spinner"], ' +
+          '.loading-content-spinner-container, ' +
           '.loading-history-spinner-container mat-progress-spinner, ' +
           '.loading-history-spinner-container mat-spinner'
         );
@@ -426,13 +437,6 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
 
       expandAllCollapsed();
 
-      // 已載入足夠數量 → 直接回到底部
-      if (stopAtCount > 0 && countTurns() >= stopAtCount) {
-        const el = getScrollEl();
-        if (el) el.scrollTop = el.scrollHeight;
-        return;
-      }
-
       const startTime = Date.now();
       let noProgress = 0;
       let clickTried = false;
@@ -444,7 +448,9 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         const before = fingerprint();
         triggerLoadOlder();
 
-        let changed = await waitForChange(before, PROGRESS_TIMEOUT_MS);
+        let changed = await waitForChange(
+          before, noProgress > 0 ? CONFIRM_TIMEOUT_MS : PROGRESS_TIMEOUT_MS
+        );
         if (isAborted()) return;
 
         // spinner 還在轉表示 Gemini 正在抓歷史 — 等它消失再重新判定
@@ -463,7 +469,6 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
         if (changed) {
           noProgress = 0;
           clickTried = false;
-          if (stopAtCount > 0 && countTurns() >= stopAtCount) break;
           await wait(250);
           continue;
         }
@@ -479,7 +484,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
               topUser.dispatchEvent(new MouseEvent('mouseup', opts));
               topUser.click();
             } catch (_) {}
-            const clickChanged = await waitForChange(fingerprint(), PROGRESS_TIMEOUT_MS);
+            const clickChanged = await waitForChange(fingerprint(), CONFIRM_TIMEOUT_MS);
             if (isAborted()) return;
             if (clickChanged) { noProgress = 0; continue; }
           }
@@ -500,7 +505,7 @@ async function scrollToLoadAllMessages(tabId, stopAtCount = 0) {
       window.scrollTo(0, document.body.scrollHeight);
       await wait(400);
     },
-    args: [stopAtCount, USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
+    args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
   });
 
   try {
@@ -717,18 +722,30 @@ async function seedStorageFromLocalBackups(dirHandle, convs) {
 // ── Single-conversation backup ─────────────────────────────────────────────────
 
 async function backupSingleTab(tab, dirHandle) {
-  // 先取得上次備份的訊息數，再決定捲動深度。
-  // 若已備份過（prevMsgCount > 0），捲到 prevMsgCount 即可停止——
-  // 新訊息已在頁面底部，舊訊息捲回到 prevMsgCount 後 DOM 即包含完整內容。
+  // 取出上次備份的訊息數，作為存檔前的回退保護：
+  // 這次載到的訊息比上次少 → 代表捲動沒完成，寧可保留舊備份也不要覆寫成殘缺版。
   const convId = stableConvId(tab.url);
   const preStored = await chrome.storage.local.get([
     `chatHash_${convId}`,
     `chatFolderName_${convId}`,
     `chatMsgCount_${convId}`,
+    `chatTailSig_${convId}`,
   ]);
   const prevMsgCount = preStored[`chatMsgCount_${convId}`] || 0;
 
-  await scrollToLoadAllMessages(tab.id, prevMsgCount);
+  // 尾端指紋相同 → 沒有新訊息，連捲動都不必做（長對話可省下數十秒）
+  const prevTailSig = preStored[`chatTailSig_${convId}`] || '';
+  if (prevTailSig && preStored[`chatHash_${convId}`]) {
+    const sig = await readTailSignature(tab.id);
+    if (sig?.tail && sig.tail === prevTailSig) {
+      const folderStillThere = await localBackupExists(
+        dirHandle, preStored[`chatFolderName_${convId}`]
+      );
+      if (folderStillThere) return { skipped: true, reason: '無新內容' };
+    }
+  }
+
+  await scrollToLoadAllMessages(tab.id);
 
   const data = await extractConversation(tab.id);
   if (!data || !data.content) {
@@ -742,6 +759,7 @@ async function backupSingleTab(tab, dirHandle) {
     `chatHash_${realConvId}`,
     `chatFolderName_${realConvId}`,
     `chatMsgCount_${realConvId}`,
+    `chatTailSig_${realConvId}`,
   ]);
 
   // hash 相同且本地資料夾確實存在 → 真正略過；否則重新寫入
@@ -774,6 +792,8 @@ async function backupSingleTab(tab, dirHandle) {
     [`chatMsgCount_${realConvId}`]: currMsgCount,
     [`chatSyncTime_${realConvId}`]: now,
   };
+  const newSig = await readTailSignature(tab.id);
+  if (newSig?.tail) storageUpdate[`chatTailSig_${realConvId}`] = newSig.tail;
   if (saveKeys.folderName) storageUpdate[`chatFolderName_${realConvId}`] = saveKeys.folderName;
   await chrome.storage.local.set(storageUpdate);
 
@@ -834,92 +854,263 @@ async function performBackup() {
 
 // ── Scroll sidebar to load all conversation links ─────────────────────────────
 //
-// Gemini's sidebar uses CDK virtual scroll — older conversations are only in the
-// DOM once you scroll down far enough.  We scroll the sidebar container to the
-// bottom, wait for new links, and repeat until the count stabilises.
+// Gemini 2026 (Voyager) 側邊欄以 <infinite-scroller> 分批載入對話，每批 20 個。
+// 2026-08 實測（533 個對話的帳號）記錄下列行為，本實作針對這些行為設計：
+//
+//   1. 批次之間有「無新增」的空窗期 — 觀測到連續 5～7 輪（約 4～6 秒）計數不變，
+//      之後才又跳一批。舊版「計數一次沒變就 break」因此固定停在 97 個。
+//   2. 真正權威的「還在抓」訊號是 infinite-scroller 內的
+//      .loading-content-spinner-container（display:none 時代表閒置）。
+//   3. 剛載入頁面、Angular 動畫未結束時，scroller 的
+//      scrollHeight - clientHeight 可能只有 ~30px，用 +50 當門檻會判定
+//      「不可捲」而整個放棄捲動。門檻必須放寬。
+//   4. 「近期對話」是 <expandable-section>；收合時對話項目不會 render。
+//   5. 載入 533 個對話：等 spinner 的版本約 36 輪 / 152 秒，不等 spinner 的
+//      盲捲版本要 88 輪 — 舊版上限 30 輪無論如何都不夠。
+//
+// 結束條件：連續 STABLE_ROUNDS 輪沒有新增、spinner 已停、且捲軸確實在底部。
 
-async function scrollSidebarToLoadAll(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async () => {
-      const wait = ms => new Promise(r => setTimeout(r, ms));
+const SIDEBAR_SLICE_ROUNDS = 5;          // 每次注入執行的捲動輪數（切片以便中途檢查停止）
+const SIDEBAR_MAX_SLICES = 100;          // 5 × 100 = 500 輪，可涵蓋 3000+ 對話
+const SIDEBAR_STABLE_ROUNDS = 8;         // 連續 N 輪無新增才視為載入完畢
+const SIDEBAR_WALL_TIMEOUT_MS = 8 * 60000;
 
-      // Find the sidebar's TRULY scrollable container.
-      // v2 (2026 redesign) 實測：conversations-list 的 scrollHeight == clientHeight，
-      // 不能捲！真正可捲的是 sidebar 內另一個 <infinite-scroller>（不同於 chat 區的），
-      // 要靠 scrollHeight + overflow-y 判斷真實可捲動性來區分。
-      function findSidebarScrollEl() {
-        const isScrollable = el => {
-          if (!el) return false;
-          if (el.scrollHeight <= el.clientHeight + 50) return false;
-          try {
-            const oy = getComputedStyle(el).overflowY;
-            return /(auto|scroll|overlay)/.test(oy);
-          } catch (_) { return true; }
-        };
-        // 候選 1：sidebar root 範圍內的 <infinite-scroller>
-        const root = document.querySelector(
-          'bard-sidenav, [data-test-id="bard-sidenav-container"]'
-        );
-        if (root) {
-          const innerIS = root.querySelector('infinite-scroller');
-          if (isScrollable(innerIS)) return innerIS;
-        }
-        // 候選 2：從第一個對話項目往上找最近可捲動祖先（最可靠的 fallback）
-        const firstItem = document.querySelector(
-          'a[href*="/app/"], [data-test-id="conversation"]'
-        );
-        if (firstItem) {
-          let el = firstItem.parentElement;
-          while (el && el !== document.body) {
-            if (isScrollable(el)) return el;
-            el = el.parentElement;
-          }
-        }
-        // legacy fallbacks
-        for (const sel of [
-          'conversations-list[data-test-id="all-conversations"]',
-          '.cdk-virtual-scroll-viewport',
-          'mat-sidenav .conversations',
-          '.conversations-list',
-          '.conversation-list',
-        ]) {
-          const el = document.querySelector(sel);
-          if (isScrollable(el)) return el;
-        }
-        return null;
+// 在頁面內執行一個「切片」：捲動數輪並回報進度。
+// 跨切片的狀態掛在 window.__gcbSidebarScan，由 driver 先行重置。
+// targetNonPinned > 0 時，非釘選對話載滿這個數量就提早收工 —— 選「前 N 個」
+// 不需要把全部 500+ 個對話都捲出來（實測全捲要 36 輪 / 約 2 分鐘，
+// 只要前 100 個約 6 輪就夠）。0 = 載入全部。
+async function sidebarScanSlice(rounds, stableTarget, targetNonPinned) {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const aborted = () => !!window.__geminiBackupAborted;
+
+  const st = window.__gcbSidebarScan || (window.__gcbSidebarScan = { prev: -1, stable: 0, rounds: 0 });
+
+  const sidenav = () =>
+    document.querySelector('bard-sidenav, [data-test-id="bard-sidenav-container"]');
+
+  // 「近期對話」收合時項目不會 render — 先確保展開
+  function ensureChatsExpanded() {
+    const root = sidenav();
+    if (!root) return false;
+    for (const sec of root.querySelectorAll('expandable-section')) {
+      const isChats =
+        sec.getAttribute('data-test-id') === 'chats-expandable-section' ||
+        !!sec.querySelector('conversations-list, [data-test-id="conversation"]');
+      if (!isChats) continue;
+      const toggle = sec.querySelector('[data-test-id="expandable-section-toggle"]');
+      if (!toggle) continue;
+      const expanded =
+        sec.classList.contains('expanded') || toggle.getAttribute('aria-expanded') === 'true';
+      if (!expanded) {
+        try { toggle.click(); } catch (_) {}
+        return true; // 有實際展開動作，呼叫端應多等一下
       }
+    }
+    return false;
+  }
 
-      const sidebarEl = findSidebarScrollEl();
-      // 找不到可捲動容器：可能結構已變，或對話少到不需捲動。
-      // 不算錯誤 — 後續 scanner 仍會掃描已 render 的對話
-      if (!sidebarEl) return;
+  // 找出真正裝著對話清單、且真的可捲動的容器。
+  // 優先從「實際存在的對話項目」往上找 — 比猜選擇器可靠得多。
+  function findScrollEl() {
+    const root = sidenav();
+    const canScroll = (el, minDelta) => {
+      if (!el || !el.isConnected) return false;
+      if (el.scrollHeight <= el.clientHeight + minDelta) return false;
+      try {
+        return /(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY);
+      } catch (_) { return true; }
+    };
 
-      function countConversationItems() {
-        return Math.max(
-          document.querySelectorAll('a[href*="/app/"]').length,
-          document.querySelectorAll('[data-test-id="conversation"]').length,
-        );
+    const item = (root || document).querySelector(
+      '[data-test-id="conversation"], a[href*="/app/"]'
+    );
+    if (item) {
+      let el = item.parentElement;
+      while (el && el !== document.body) {
+        if (canScroll(el, 4)) return el;
+        el = el.parentElement;
       }
+    }
 
-      let prevCount = countConversationItems();
-
-      for (let attempt = 0; attempt < 30; attempt++) {
-        sidebarEl.scrollTop = sidebarEl.scrollHeight;
-        // 主動派發 scroll 事件 — 某些 listener 是 passive 不會被 assignment 觸發
-        try { sidebarEl.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
-        await wait(1200);
-
-        const newCount = countConversationItems();
-        if (newCount === prevCount) break; // Stable — all conversations loaded
-        prevCount = newCount;
+    if (root) {
+      // 清單還沒撐開高度時，只要 overflow-y 允許捲動就先接受（門檻 0）
+      for (const el of root.querySelectorAll('infinite-scroller')) {
+        if (canScroll(el, 4)) return el;
       }
+      for (const el of root.querySelectorAll('infinite-scroller')) {
+        try {
+          if (/(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY)) return el;
+        } catch (_) {}
+      }
+    }
 
-      // Scroll back to top so the sidebar looks normal for the user
-      sidebarEl.scrollTop = 0;
+    for (const sel of [
+      'conversations-list[data-test-id="all-conversations"]',
+      '.cdk-virtual-scroll-viewport',
+      '.conversations-list',
+      '.conversation-list',
+    ]) {
+      const el = document.querySelector(sel);
+      if (canScroll(el, 4)) return el;
+    }
+    return null;
+  }
+
+  // Gemini 正在向後端抓下一批的訊號
+  function isLoadingMore() {
+    const root = sidenav();
+    if (!root) return false;
+    const els = root.querySelectorAll(
+      '.loading-content-spinner-container, mat-progress-spinner, mat-spinner, [role="progressbar"]'
+    );
+    for (const el of els) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity || '1') > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function countItems() {
+    const root = sidenav() || document;
+    return Math.max(
+      root.querySelectorAll('[data-test-id="conversation"]').length,
+      root.querySelectorAll('a[href*="/app/"]').length
+    );
+  }
+
+  // 釘選數量（釘選項目一律排在最前面，且永遠全部備份，不計入 N）
+  function countPinned() {
+    const root = sidenav() || document;
+    return root.querySelectorAll(
+      '.trailing-icon-container [data-mat-icon-name="push_pin"]'
+    ).length;
+  }
+
+  // 已載入的非釘選對話是否已滿足需求
+  function reachedTarget() {
+    if (!targetNonPinned || targetNonPinned <= 0) return false;
+    return countItems() - countPinned() >= targetNonPinned;
+  }
+
+  if (aborted()) return { aborted: true, count: countItems(), rounds: st.rounds };
+
+  if (ensureChatsExpanded()) await wait(600);
+
+  if (reachedTarget()) {
+    return { scrollerFound: true, done: true, count: countItems(), rounds: st.rounds, target: true };
+  }
+
+  const sc = findScrollEl();
+  window.__gcbSidebarScrollEl = sc; // driver 結束時用來捲回頂端
+  if (!sc) {
+    // 對話少到不需捲動，或側邊欄結構已變 — 交給 scanner 掃現有的，不算錯誤
+    return { scrollerFound: false, done: true, count: countItems(), rounds: st.rounds };
+  }
+
+  for (let i = 0; i < rounds; i++) {
+    if (aborted()) return { aborted: true, count: countItems(), rounds: st.rounds };
+
+    sc.scrollTop = sc.scrollHeight;
+    // 主動派發 — 部分 listener 為 passive，assignment 不會觸發
+    try { sc.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
+    await wait(500);
+
+    // 等 Gemini 抓完這一批（spinner 消失），最多 20 秒
+    let waited = 0;
+    while (isLoadingMore() && waited < 20000) {
       await wait(300);
-    },
-  });
+      waited += 300;
+      if (aborted()) return { aborted: true, count: countItems(), rounds: st.rounds };
+    }
+    await wait(350); // 讓 Angular render 完新項目
+
+    st.rounds++;
+    const n = countItems();
+    const atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 8;
+
+    if (n > st.prev) {
+      st.prev = n;
+      st.stable = 0;
+    } else {
+      st.stable++;
+    }
+
+    if (reachedTarget()) {
+      return { scrollerFound: true, done: true, count: n, rounds: st.rounds, target: true };
+    }
+    if (st.stable >= stableTarget && atBottom && !isLoadingMore()) {
+      return { scrollerFound: true, done: true, count: n, rounds: st.rounds, atBottom };
+    }
+  }
+
+  return {
+    scrollerFound: true,
+    done: false,
+    count: countItems(),
+    rounds: st.rounds,
+    stable: st.stable,
+  };
+}
+
+// driver：分批注入 sidebarScanSlice，切片之間檢查停止旗標並回報進度。
+// onProgress(count) 由呼叫端用來更新 UI。
+async function scrollSidebarToLoadAll(tabId, onProgress, targetNonPinned = 0) {
+  const started = Date.now();
+  let last = { count: 0, rounds: 0 };
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => { window.__gcbSidebarScan = { prev: -1, stable: 0, rounds: 0 }; },
+    });
+  } catch (_) {}
+
+  for (let slice = 0; slice < SIDEBAR_MAX_SLICES; slice++) {
+    if (Date.now() - started > SIDEBAR_WALL_TIMEOUT_MS) break;
+
+    const { stopBackupRequested } = await chrome.storage.local.get('stopBackupRequested');
+    if (stopBackupRequested) return { ...last, aborted: true };
+
+    let r;
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: sidebarScanSlice,
+        args: [SIDEBAR_SLICE_ROUNDS, SIDEBAR_STABLE_ROUNDS, targetNonPinned],
+      });
+      r = res?.result;
+    } catch (err) {
+      console.warn('[Sidebar] scan slice failed:', err);
+      break;
+    }
+    if (!r) break;
+
+    last = r;
+    if (onProgress) { try { await onProgress(r.count || 0); } catch (_) {} }
+
+    if (r.aborted) return { ...r, aborted: true };
+    if (r.done) break;
+  }
+
+  // 捲回頂端，讓側邊欄回到使用者習慣的樣子
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const el = window.__gcbSidebarScrollEl;
+        const root = document.querySelector('bard-sidenav');
+        const sc = el?.isConnected ? el : root?.querySelector('infinite-scroller');
+        if (sc) sc.scrollTop = 0;
+      },
+    });
+  } catch (_) {}
+
+  return last;
 }
 
 // ── Full history backup ────────────────────────────────────────────────────────
@@ -943,6 +1134,7 @@ async function performFullHistoryBackup(limitCount = 0) {
     selectedLimit: limitCount,
     currentTitle: '',
     currentUrl: '',
+    scanCount: 0,     // 側邊欄捲動階段已載入的對話數（給 popup 顯示進度用）
     startedAt: new Date().toISOString(),
     lastUpdated: new Date().toISOString(),
     conversations: [], // 所有候選對話及其狀態 {url, title, status, reason}
@@ -1033,10 +1225,26 @@ async function performFullHistoryBackup(limitCount = 0) {
       }
     } catch (_) {} // 偵測失敗就照常繼續，sidebar_scanner 結果為空時有既有錯誤處理
 
-    // Scroll sidebar first to load ALL conversations (CDK virtual scroll)
+    // 先捲側邊欄把「所有」對話載進 DOM（Voyager 每批 20 個，需捲很多輪）。
+    // 期間把已載入數量回報到 state，讓 popup 顯示「正在掃描（N）」而不是空轉。
+    let scanResult = null;
     try {
-      await scrollSidebarToLoadAll(tabId);
+      scanResult = await scrollSidebarToLoadAll(tabId, async (count) => {
+        state.scanCount = count;
+        await saveState();
+      }, limitCount);
     } catch (_) {} // Non-fatal — scan whatever is visible if this fails
+
+    // 載入 500+ 對話可能要好幾分鐘，期間按停止要能立刻收工
+    if (scanResult?.aborted) {
+      await chrome.storage.local.remove('stopBackupRequested');
+      state.inProgress = false;
+      state.stoppedByUser = true;
+      state.completedAt = new Date().toISOString();
+      await saveState();
+      try { await chrome.tabs.update(tabId, { url: originalUrl }); } catch (_) {}
+      return;
+    }
 
     // Scan sidebar for conversation list
     let conversations;
@@ -1114,11 +1322,12 @@ async function performFullHistoryBackup(limitCount = 0) {
       try {
         const convId = stableConvId(conv.url);
 
-        // 先取出已儲存的 hash 和 msg count（不需要等 navigation）
+        // 先取出已儲存的 hash / msg count / 尾端指紋（不需要等 navigation）
         const stored = await chrome.storage.local.get([
           `chatHash_${convId}`,
           `chatFolderName_${convId}`,
           `chatMsgCount_${convId}`,
+          `chatTailSig_${convId}`,
         ]);
 
         const isGemChat = conv.url.includes('/gem/');
@@ -1138,33 +1347,33 @@ async function performFullHistoryBackup(limitCount = 0) {
         );
         const hasPrevBackup = !!prevHash && prevMsgCount > 0;
 
-        if (hasPrevBackup && alreadyFolder) {
-          try {
-            const [countResult] = await chrome.scripting.executeScript({
-              target: { tabId },
-              func: countMessagesOnPage,
-              args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
-            });
-            const quickCount = countResult?.result || 0;
-            if (quickCount > 0 && quickCount <= prevMsgCount) {
-              // 沒有新訊息 → 完全跳過捲動與擷取（真正的快速略過）
-              if (convEntry) convEntry.status = 'skipped';
-              state.skipped++;
-              state.done++;
-              await saveState();
-              await randomDelay(800, 1600);
-              continue;
-            }
-          } catch (_) {} // 計數失敗就照常走完整流程
+        // ── 快速略過：比對尾端指紋 ────────────────────────────────────────
+        // 新訊息一定 append 在對話尾端，而尾端在初次 render 就已存在，
+        // 所以尾端指紋相同 = 沒有新訊息，可以完全跳過捲動與擷取。
+        // 舊版改用「畫面訊息數 <= 上次備份數」，對 20 則以上的對話恆為真
+        //（實測 Gemini 初次只 render 20 則），會把有新訊息的長對話一起略過
+        // —— 這是 v2.2.3 修掉的漏備份主因。
+        // 沒有尾端指紋（升級前備份的對話）就照常走完整流程，寧可慢也不漏。
+        const prevTailSig = stored[`chatTailSig_${convId}`] || '';
+        if (hasPrevBackup && alreadyFolder && prevTailSig) {
+          const sig = await readTailSignature(tabId);
+          if (sig && sig.tail && sig.tail === prevTailSig) {
+            if (convEntry) convEntry.status = 'skipped';
+            state.skipped++;
+            state.done++;
+            await saveState();
+            await randomDelay(800, 1600);
+            continue;
+          }
         }
 
         // ── Stop check #3：scroll 前確認（scroll 可能是最耗時的步驟）──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
           if (s) { await handleStop(); return; } }
 
-        // 傳入 prevMsgCount：捲回到上次備份數量後即可停止，不需要捲到最舊
-        // prevMsgCount = 0 表示從未備份，會退回為全量捲動
-        await scrollToLoadAllMessages(tabId, prevMsgCount);
+        // 走到這裡代表尾端指紋不同（或還沒有指紋）＝ 內容真的變了。
+        // 備份檔是整份覆寫，所以必須載入完整歷史，不能只補新的部分。
+        await scrollToLoadAllMessages(tabId);
 
         // ── Stop check #4：scroll 完成後、extract 前 ──
         { const { stopBackupRequested: s } = await chrome.storage.local.get('stopBackupRequested');
@@ -1217,6 +1426,9 @@ async function performFullHistoryBackup(limitCount = 0) {
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
           };
+          // 記下尾端指紋供下次增量判斷（此時歷史已完整載入，尾端是真正的最後一則）
+          const newSig = await readTailSignature(tabId);
+          if (newSig?.tail) storageUpdate[`chatTailSig_${convId}`] = newSig.tail;
           if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
           await chrome.storage.local.set(storageUpdate);
         }
@@ -1361,7 +1573,7 @@ async function performRetryFailedBackup() {
         await navigateAndWaitRetry(tabId, target.url, isGemChat ? 4000 : 2500);
 
         // 重試時不信任舊的 msgCount，做完整 scroll
-        await scrollToLoadAllMessages(tabId, 0);
+        await scrollToLoadAllMessages(tabId);
 
         const data = await extractConversation(tabId);
 
@@ -1411,6 +1623,9 @@ async function performRetryFailedBackup() {
             [`chatMsgCount_${convId}`]: currMsgCount,
             [`chatSyncTime_${convId}`]: now,
           };
+          // 記下尾端指紋供下次增量判斷（此時歷史已完整載入，尾端是真正的最後一則）
+          const newSig = await readTailSignature(tabId);
+          if (newSig?.tail) storageUpdate[`chatTailSig_${convId}`] = newSig.tail;
           if (saveKeys.folderName) storageUpdate[`chatFolderName_${convId}`] = saveKeys.folderName;
           await chrome.storage.local.set(storageUpdate);
         }
@@ -1506,7 +1721,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const convId = stableConvId(url);
 
     chrome.storage.local.get(
-      [`chatHash_${convId}`, `chatSyncTime_${convId}`, `chatMsgCount_${convId}`, 'fullBackupState'],
+      [`chatHash_${convId}`, `chatSyncTime_${convId}`, `chatMsgCount_${convId}`,
+       `chatTailSig_${convId}`, 'fullBackupState'],
       async (data) => {
         // chatSyncTime 兼容舊版：升級後 chatHash 尚未寫入前，舊備份仍視為已同步
         const isSynced = !!(data[`chatHash_${convId}`] || data[`chatSyncTime_${convId}`]);
@@ -1515,16 +1731,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const fullState = data.fullBackupState;
         const isSyncing = !!(fullState?.inProgress && fullState?.currentUrl === url);
 
+        // 「有新訊息」徽章：優先比對尾端指紋。
+        // 舊版比 currentCount > storedMsgCount，但 Gemini 初次只 render 20 則，
+        // 20 > 200 永遠不成立 —— 長對話的徽章因此從來不會亮。
+        const storedTailSig = data[`chatTailSig_${convId}`] || '';
         let hasNewMessages = false;
-        if (isSynced && !isSyncing && tabId && storedMsgCount > 0) {
+        if (isSynced && !isSyncing && tabId) {
           try {
-            const [result] = await chrome.scripting.executeScript({
-              target: { tabId },
-              func: countMessagesOnPage,
-              args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
-            });
-            const currentCount = result?.result || 0;
-            hasNewMessages = currentCount > storedMsgCount;
+            if (storedTailSig) {
+              const sig = await readTailSignature(tabId);
+              hasNewMessages = !!(sig?.tail && sig.tail !== storedTailSig);
+            } else if (storedMsgCount > 0) {
+              // 升級前備份、還沒有指紋 → 沿用舊的計數比對（只會少報不會誤報）
+              const [result] = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: countMessagesOnPage,
+                args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
+              });
+              hasNewMessages = (result?.result || 0) > storedMsgCount;
+            }
           } catch (_) {}
         }
 
@@ -1566,6 +1791,75 @@ function countMessagesOnPage(userSelectors, modelSelectors) {
     if (found.length) { modelCount = found.length; break; }
   }
   return userCount + modelCount;
+}
+
+// ── 對話「尾端指紋」──────────────────────────────────────────────────────────
+//
+// 為什麼需要它：Gemini 開啟長對話時「只 render 最後 20 則」，其餘要往上捲才載入。
+// 舊版增量判斷用「目前畫面上的訊息數 <= 上次備份數」來略過，對超過 20 則的對話
+// 永遠成立（20 <= 200），結果是長對話一旦備份過就再也不會更新 —— 新訊息被靜默漏掉。
+// 2026-08 於 Voyager 實測確認：初次 render 固定 20 則，且「最後一則」一定在 DOM 裡
+// （捲到底後尾端內容不變）。因此改用尾端內容當指紋：新訊息一律 append 在尾端，
+// 尾端沒變就代表沒有新訊息，這個判斷不受虛擬化 render 影響。
+function computeTailSignatureOnPage(userSelectors, modelSelectors) {
+  function queryShadowAll(root, selector) {
+    const results = [];
+    const visited = new WeakSet();
+    function traverse(node) {
+      if (!node || visited.has(node)) return;
+      visited.add(node);
+      try {
+        Array.from(node.querySelectorAll(selector)).forEach(el => results.push(el));
+        Array.from(node.querySelectorAll('*')).forEach(el => {
+          if (el.shadowRoot) traverse(el.shadowRoot);
+        });
+      } catch (_) {}
+    }
+    traverse(root);
+    return results;
+  }
+
+  function lastText(selectors) {
+    for (const sel of selectors) {
+      const found = queryShadowAll(document, sel);
+      if (found.length) {
+        const el = found[found.length - 1];
+        return (el.innerText || el.textContent || '').trim();
+      }
+    }
+    return '';
+  }
+
+  const userTail = lastText(userSelectors);
+  const modelTail = lastText(modelSelectors);
+  const rendered =
+    (function () {
+      let u = 0, m = 0;
+      for (const sel of userSelectors) { const f = queryShadowAll(document, sel); if (f.length) { u = f.length; break; } }
+      for (const sel of modelSelectors) { const f = queryShadowAll(document, sel); if (f.length) { m = f.length; break; } }
+      return u + m;
+    })();
+
+  // 只取尾端 400 字做指紋 —— 足以辨識「有沒有新訊息」，又不必搬運整篇內容
+  const raw = `${userTail.slice(-400)}\u0000${modelTail.slice(-400)}`;
+  let h = 5381;
+  for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0;
+
+  return { rendered, tail: raw ? `${raw.length}:${(h >>> 0).toString(36)}` : '' };
+}
+
+// 讀取目前分頁的尾端指紋；失敗回傳 null（呼叫端退回完整流程，不會誤略過）
+async function readTailSignature(tabId) {
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: computeTailSignatureOnPage,
+      args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
+    });
+    return res?.result || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // Restore alarm on service worker restart

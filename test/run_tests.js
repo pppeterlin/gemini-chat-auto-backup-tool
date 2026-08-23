@@ -442,6 +442,102 @@ const folderName = '學習筆記_Part_2_abc123';
 test('資料夾後綴匹配 convId', () => folderName.endsWith('_abc123'));
 test('不匹配其他 convId', () => !folderName.endsWith('_def456'));
 
+// ── Test 11: Voyager jslog metadata 解析 ────────────────────────────────────
+print('\n【T11】Voyager jslog metadata（釘選狀態與清單順序）');
+
+// 2026-08 於 Gemini Voyager 實測到的真實 jslog 字串
+function extractMetaFromJslog(value) {
+  const match = String(value || '').match(
+    /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*\]/
+  );
+  if (!match) return null;
+  return { pinned: match[1] === '1', index: Number(match[2]) };
+}
+
+const pinnedJslog =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  '[null,null,null,null,null,null,null,["c_5c20a79185935ade",null,1,0]];mutable:true';
+const plainJslog =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  '[null,null,null,null,null,null,null,["c_c6c6e6d95b3ce14a",null,0,532]];mutable:true';
+
+test('釘選項目 pinned=true', () => extractMetaFromJslog(pinnedJslog).pinned === true);
+assertEqual('釘選項目 index', extractMetaFromJslog(pinnedJslog).index, 0);
+test('一般項目 pinned=false', () => extractMetaFromJslog(plainJslog).pinned === false);
+assertEqual('一般項目 index', extractMetaFromJslog(plainJslog).index, 532);
+test('格式不符回傳 null', () => extractMetaFromJslog('186014;track:generic_click') === null);
+
+// jslog 內另有 "generic_click"，chatId 抽取必須帶 \b 才不會誤抓成 "lick"
+assertEqual('chatId 不被 generic_click 汙染',
+  extractChatIdFromJslog(pinnedJslog), '5c20a79185935ade');
+
+// ── Test 12: 尾端指紋 ───────────────────────────────────────────────────────
+print('\n【T12】對話尾端指紋（增量備份判斷）');
+
+function tailSig(userTail, modelTail) {
+  const raw = `${String(userTail).slice(-400)}\u0000${String(modelTail).slice(-400)}`;
+  let h = 5381;
+  for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0;
+  return raw ? `${raw.length}:${(h >>> 0).toString(36)}` : '';
+}
+
+const sigA = tailSig('幫我翻譯', 'Here is the translation.');
+test('相同尾端 → 指紋相同', () => sigA === tailSig('幫我翻譯', 'Here is the translation.'));
+test('模型回覆變了 → 指紋不同', () => sigA !== tailSig('幫我翻譯', 'Here is the translation!'));
+test('新增使用者訊息 → 指紋不同', () => sigA !== tailSig('再翻一次', 'Here is the translation.'));
+test('指紋為非空字串', () => typeof sigA === 'string' && sigA.length > 0);
+// 只取尾端 400 字：開頭不同但最後 400 字相同的長訊息會視為同一則
+const longA = 'X'.repeat(600) + 'T'.repeat(400);
+const longB = 'Y'.repeat(600) + 'T'.repeat(400);
+test('僅比對尾端 400 字', () => tailSig('q', longA) === tailSig('q', longB));
+// 但尾端 400 字內有差異就必須測得出來
+test('尾端 400 字內有差異會被偵測',
+  () => tailSig('q', 'Z'.repeat(600) + 'T'.repeat(399) + 'U') !== tailSig('q', longA));
+
+// ── Test 13: 備份範圍（預設值 + 自訂數量）──────────────────────────────────
+print('\n【T13】備份範圍設定');
+
+const LIMIT_PRESETS = [0, 5, 10, 20, 30, 50, 100];
+const LIMIT_MAX = 9999;
+
+// 對照 popup.js 的 getLimitCount：select 值 + 自訂輸入 → 實際數量
+function getLimitCount(selectValue, customValue) {
+  if (selectValue !== 'custom') return Number(selectValue) || 0;
+  const n = Math.floor(Number(customValue));
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(n, LIMIT_MAX);
+}
+
+assertEqual('預設「全部」→ 0', getLimitCount('0', '100'), 0);
+assertEqual('預設「前 30 個」→ 30', getLimitCount('30', '100'), 30);
+assertEqual('自訂 250 → 250', getLimitCount('custom', '250'), 250);
+assertEqual('自訂小數無條件捨去', getLimitCount('custom', '42.9'), 42);
+assertEqual('自訂超過上限夾回 9999', getLimitCount('custom', '99999'), LIMIT_MAX);
+assertEqual('自訂空白 → 0（全部）', getLimitCount('custom', ''), 0);
+assertEqual('自訂非數字 → 0（全部）', getLimitCount('custom', 'abc'), 0);
+assertEqual('自訂 0 → 0（全部）', getLimitCount('custom', '0'), 0);
+assertEqual('自訂負數 → 0（全部）', getLimitCount('custom', '-5'), 0);
+test('回傳值永遠是數字', () =>
+  [['custom','abc'], ['custom',''], ['0','1'], ['100','1']]
+    .every(([a, b]) => Number.isFinite(getLimitCount(a, b))));
+
+// 對照 popup.js 的 applyLimitToUI：儲存的數字 → 還原成哪個 UI 狀態
+function applyLimitToUI(value) {
+  const n = Number(value) || 0;
+  if (LIMIT_PRESETS.includes(n)) return { select: String(n), custom: null };
+  return { select: 'custom', custom: String(Math.min(Math.max(Math.floor(n), 1), LIMIT_MAX)) };
+}
+
+assertEqual('還原 30 → 選預設', applyLimitToUI(30).select, '30');
+assertEqual('還原 0 → 選全部', applyLimitToUI(0).select, '0');
+assertEqual('還原 250 → 進自訂', applyLimitToUI(250).select, 'custom');
+assertEqual('還原 250 → 填入 250', applyLimitToUI(250).custom, '250');
+// 存進去什麼、還原後就該算出什麼
+test('存取往返一致', () => [0, 5, 30, 100, 250, 1000].every(n => {
+  const ui = applyLimitToUI(n);
+  return getLimitCount(ui.select, ui.custom) === n;
+}));
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 print('\n══════════════════════════════════════════');
 const total = passed + failed;
