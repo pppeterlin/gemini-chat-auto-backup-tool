@@ -29,23 +29,41 @@
     return match ? match[1] : null;
   }
 
-  // jslog 屬性內含 "c_<chatId>" 形式的對話 ID。
-  // 注意必須帶 \b：jslog 裡另有 "track:generic_click"，不加邊界會誤抓成 "lick"。
-  function extractChatIdFromJslog(value) {
-    const match = String(value || '').match(/\bc_([a-zA-Z0-9_-]+)/);
-    return match ? match[1] : null;
+  // jslog 的 BardVeMetadataKey 是 Gemini 自己標記的對話 metadata。
+  //   2026-08：明文   BardVeMetadataKey:[...,["c_<chatId>",null,<pinned>,<index>]]
+  //   2026-10：base64 BardVeMetadataKey:<base64 of [...,["c_<chatId>",null,<pinned>,<index>,0]]>
+  // 回傳要搜尋的文字：解碼後的 metadata（若有）+ 原始 jslog。
+  function jslogTexts(value) {
+    const raw = String(value || '');
+    const texts = [];
+    const m = raw.match(/BardVeMetadataKey:([A-Za-z0-9+/_-]+={0,2})/);
+    if (m) {
+      try { texts.push(atob(m[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch (_) {}
+    }
+    texts.push(raw);
+    return texts;
   }
 
-  // Voyager (2026) 的 jslog 內含結構化 metadata，實測格式為：
-  //   BardVeMetadataKey:[...,["c_<chatId>", null, <pinned 0|1>, <index>]]
-  // 這是 Gemini 自己標記的釘選狀態與清單順序，比從 DOM 猜 push_pin icon 可靠。
+  // jslog 內含 "c_<chatId>" 形式的對話 ID。
+  // 注意必須帶 \b：jslog 裡另有 "track:generic_click"，不加邊界會誤抓成 "lick"。
+  function extractChatIdFromJslog(value) {
+    for (const text of jslogTexts(value)) {
+      const match = text.match(/\bc_([a-zA-Z0-9_-]+)/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  // 從 metadata 取出釘選狀態與清單順序，比從 DOM 猜 pin icon 可靠。
   // 回傳 { pinned, index }；解析不出來時回傳 null 讓呼叫端退回 DOM 判斷。
   function extractMetaFromJslog(value) {
-    const match = String(value || '').match(
-      /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*\]/
-    );
-    if (!match) return null;
-    return { pinned: match[1] === '1', index: Number(match[2]) };
+    for (const text of jslogTexts(value)) {
+      const match = text.match(
+        /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*[,\]]/
+      );
+      if (match) return { pinned: match[1] === '1', index: Number(match[2]) };
+    }
+    return null;
   }
 
   // Try to extract a meaningful title from a conversation element.
@@ -80,14 +98,13 @@
     return '未命名對話';
   }
 
-  // 判斷單一對話元素是否為「已釘選」。
-  // Gemini 把釘選圖示直接放在項目內的 .trailing-icon-container：
-  //   pinned   → 含 <mat-icon data-mat-icon-name="push_pin">
-  //   unpinned → trailing-icon-container 為空
-  // 所以只要在項目自身範圍內找 push_pin icon 即可，不需往上找 list item
+  // 判斷單一對話元素是否為「已釘選」（jslog metadata 解析不到時的退路）。
+  // 2026-10 起釘選項目內有 .conversation-pin-icon；舊版是 .trailing-icon-container
+  // 裡的 push_pin icon，未釘選時為空。只在項目自身範圍內找，不往上找 list item
   // （往上找會誤抓 sibling 對話的「更多選項」選單裡的 Pin 動作圖示）。
   function isPinned(el) {
     if (!el) return false;
+    if (el.querySelector('.conversation-pin-icon')) return true;
     if (el.querySelector('.trailing-icon-container [data-mat-icon-name="push_pin"]')) return true;
     if (el.querySelector('.trailing-icon-container [fonticon="push_pin"]')) return true;
     if (el.querySelector('[data-mat-icon-name="keep"], [fonticon="keep"]')) return true;

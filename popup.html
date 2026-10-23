@@ -311,6 +311,10 @@
     .sync-badge.synced  { background: var(--success-bg); color: var(--success); border-color: #C6DBCC; }
     .sync-badge.has-new { background: var(--warning-bg); color: var(--warning); border-color: #E6D4A8; }
     #sync-status-time { font-size: 11px; color: var(--ink-muted); }
+    .voyager-status { margin-top: 6px; font-size: 11px; color: var(--ink-muted); }
+    .voyager-status:empty { display: none; }
+    .voyager-status.linked::before  { content: '● '; color: var(--success); }
+    .voyager-status.missing { color: var(--warning); }
 
     /* ── Full backup progress ── */
     #full-backup-progress { margin-top: 10px; }
@@ -521,6 +525,7 @@
         <span id="sync-status-badge" class="sync-badge never">未同步</span>
         <span id="sync-status-time"></span>
       </div>
+      <div id="voyager-status" class="voyager-status"></div>
     </div>
 
     <!-- 設定 -->

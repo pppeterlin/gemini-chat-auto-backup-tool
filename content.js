@@ -68,6 +68,8 @@
       if (node.classList) {
         if (node.classList.contains('thoughts-container') ||
             node.classList.contains('thoughts-content')) return '';
+        // Voyager 的「訊息時間」標籤插在 user-query 內，不屬於對話正文
+        if (node.classList.contains('gv-timestamp')) return '';
         // KaTeX 數學式：優先取原始 LaTeX，避免 mathml + html 重複輸出
         if (node.classList.contains('katex-display')) {
           const tex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
@@ -371,21 +373,34 @@
     return !!btn.closest('code-block, pre, .code-block');
   }
 
+  // Voyager 會在回覆的操作列加自己的按鈕（data-test-id="gv-*"），例如「複製回覆為圖片」。
+  // 它的 aria-label 含「複製回覆」，點到會讓 Voyager 產生圖片、bridge 只收到空字串，
+  // 連兩次後官方複製就整個停用 —— 2026-10 實測 Voyager 2.2.0 正是如此。
+  function isVoyagerButton(btn) {
+    if ((btn.getAttribute('data-test-id') || '').startsWith('gv-')) return true;
+    return !!btn.closest('[data-test-id^="gv-"]');
+  }
+
+  // 2026-10 起 Gemini 的複製鈕包在 <copy-button> 元素裡（message-actions copy-button button），
+  // aria-label 只剩「複製」；舊版是 [data-test-id="copy-button"]。
   function findCopyButton(modelEl) {
     const container = modelEl.closest?.(
       'response-container, .response-container, .presented-response-container'
     ) || modelEl;
+    const usable = b => !isCodeBlockButton(b) && !isVoyagerButton(b);
     const directCandidates = Array.from(container.querySelectorAll?.(
-      '[data-test-id="copy-button"] button, button[data-test-id="copy-button"], [data-test-id="copy-button"]'
+      'copy-button button, [data-test-id="copy-button"] button, ' +
+      'button[data-test-id="copy-button"], [data-test-id="copy-button"]'
     ) || []);
-    const direct = directCandidates.find(b => !isCodeBlockButton(b));
+    const direct = directCandidates.find(usable);
     if (direct) return direct;
-    // aria-label 必須同時含「複製」與「回覆/回應」語意，避免抓到其他複製按鈕
+    // aria-label 退路：只認「複製」本身或同時含「複製」與「回覆」語意，避免抓到其他複製按鈕
     const byLabel = Array.from(container.querySelectorAll?.('button[aria-label]') || [])
       .find(b => {
-        if (isCodeBlockButton(b)) return false;
-        const label = b.getAttribute('aria-label') || '';
-        return /copy response|copy answer|複製回覆|複製回應|复制回复|回答をコピー|回覆/i.test(label) ||
+        if (!usable(b)) return false;
+        const label = (b.getAttribute('aria-label') || '').trim();
+        return /^(copy|複製|复制|コピー|복사)$/i.test(label) ||
+               /copy response|copy answer|複製回覆|複製回應|复制回复|回答をコピー/i.test(label) ||
                (/copy|複製|复制/i.test(label) && /response|answer|回覆|回應|回复|回答/i.test(label));
       });
     return byLabel || null;
@@ -408,7 +423,12 @@
         await new Promise(r => setTimeout(r, 50));
         if ((bridge.getAttribute('data-seq') || '0') !== prevSeq) {
           const text = (bridge.textContent || '').trim();
-          if (text) return text;
+          if (text) {
+            // 只有「連續」失敗才停用：個別回覆（例如生成圖片）複製出來本來就沒有文字，
+            // 不該讓整段對話後面的回覆都失去官方格式
+            officialCopyStrikes = 0;
+            return text;
+          }
           break;
         }
       }
@@ -612,7 +632,9 @@
   // meta 註記寫在檔尾，讓 background.js 之後可以直接從備份資料夾重建索引
   //（例如擴充套件重裝、chrome.storage 被清除後，仍能正確做增量判斷）。
   const hash = stableContentHash(messages);
-  const chatIdMatch = conversationUrl.match(/\/app\/([a-zA-Z0-9_-]+)/);
+  // 同 background.js extractChatId：Gem 對話網址為 /gem/[gemId]/[chatId]
+  const chatIdMatch = conversationUrl.match(/\/app\/([a-zA-Z0-9_-]+)/) ||
+                      conversationUrl.match(/\/gem\/[a-zA-Z0-9_-]+\/([a-zA-Z0-9_-]+)/);
   const metaId = chatIdMatch ? chatIdMatch[1] : '';
   md += `\n<!-- gemini-backup:v1 hash=${hash} msgs=${messages.length} id=${metaId} -->\n`;
 
