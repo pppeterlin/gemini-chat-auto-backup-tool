@@ -49,6 +49,8 @@
 
 ## 安裝方式
 
+> 💡 **建議搭配 [Voyager](https://github.com/voyager-crew/voyager) 2.x 使用。** 本套件會偵測 Voyager 並直接使用它提供的「Gemini 正在載入歷史」訊號，長對話的完整載入因此又快又不會漏。沒有 Voyager 也能運作，只是長對話要靠逾時判斷、較慢。Popup 的「當前對話狀態」會顯示是否已連動。
+
 目前尚未上架 Chrome Web Store，請使用開發者模式手動載入：
 
 **方法一：下載 ZIP（推薦）**
@@ -140,12 +142,47 @@ $JSC test/run_tests.js
 ## 已知限制
 
 - Gemini 的 DOM 結構不定期更新，若備份失敗請回報 Issue
+- 未安裝 Voyager 時，長對話的歷史載入只能靠逾時判斷，每個有變動的長對話結尾約多等 30 秒
 - File System Access API 的資料夾授權在瀏覽器重啟後可能需要重新點擊備份按鈕以觸發重新授權
 - 備份期間請勿關閉 Gemini 分頁
 
 ---
 
 ## Changelog
+
+### v2.3.0 — 2026-10-22
+
+以 Voyager 2.2.0 為主軸重構，並以實際帳號在 Chrome 上逐項實測。
+
+#### 歷史載入改聽 Voyager 的請求訊號
+Voyager 2.x 的 conversation-history-observer 會在 Gemini 每次抓更早的歷史（batchexecute `hNvQHb`）時發出 start / end 訊號，且不受 Voyager 其他設定影響。改為直接聽這個訊號：請求在飛就一定等；沒有請求、也沒有新內容，安靜滿 12 秒才判定到頂——與 Voyager 自己匯出時的判斷方式相同。
+
+實測發現舊版的判斷會截斷備份：
+
+```
+單一請求耗時 1.3～30 秒（被節流時更慢）
+舊版：8 秒沒變化 → 點最上方訊息 → 兩輪確認 ≈ 16 秒就判定「到頂」
+```
+
+對話區的 loading spinner 在請求期間全程不可見，舊的 spinner 偵測是死碼，慢請求一律被當成「已經到頂」。
+
+- 最後一頁必定不足 10 則（實測 348 則的對話最後一頁 8 則、173 則的是 3 則）：上一頁不足 10 則時只做 3 秒確認。大多數對話不到 10 則，收尾由約 17 秒降為 **3 秒**
+- 移除改以 Voyager 訊號取代的邏輯：spinner 偵測、模擬點擊最上方訊息、點擊導致整頁重載的重試、多容器捲動、Voyager timeline dot 點擊（`background.js` 淨減約 100 行）
+- 沒裝 Voyager 仍可運作（內容指紋 + 30 秒安靜視窗，正確但慢）；Popup 顯示「已連動 Voyager / 未偵測到 Voyager」
+
+#### 官方複製擷取誤點 Voyager 的按鈕
+Voyager 在回覆操作列加了「複製回覆為圖片」，它的 aria-label 含「複製回覆」，被我們的備援規則命中——點下去拿到的是圖片、bridge 只收到空字串，連兩次後官方複製整段停用（實測 0/2 成功）。同時 Gemini 的複製鈕改包在 `<copy-button>` 元素內，原本的 `data-test-id="copy-button"` 已不存在。
+
+- 優先匹配 `copy-button button`，並排除所有 `data-test-id="gv-*"` 的 Voyager 按鈕：實測 29/32 成功（其餘為含圖片的回覆，本來就走 DOM 轉換保留圖片連結）
+- 停用條件由「累計 2 次失敗」改為「連續 2 次失敗」，個別無文字的回覆不再拖累整段對話
+
+#### 對應 Gemini 2026-10 改版
+- **側邊欄 jslog metadata 改為 base64**：舊解析 0/34 命中，釘選狀態與排序全部失效；改為先解碼再解析，34/34
+- **釘選圖示改為 `.conversation-pin-icon`**：「前 N 個」模式原本把 10 個釘選算成一般對話，實際只備份 N−10 個
+- **Gem 對話網址改為 `/gem/<gemId>/<chatId>`**（側邊欄 href 仍是 `/app/<chatId>`）：手動備份原本拿網址 hash 當 ID，會與全量備份存成兩份；Popup 也不顯示 Gem 對話的狀態卡
+- Voyager 的「訊息時間」標籤（`.gv-timestamp`）插在使用者訊息內，排除於備份內文與尾端指紋之外，開關該功能不會讓 hash 變動
+
+測試：94/94 通過（新增 11 項，涵蓋 base64 jslog、Gem 網址、Voyager 標籤排除）。
 
 ### v2.2.3 — 2026-08-23
 
@@ -339,6 +376,8 @@ A Chrome extension that automatically backs up your [Google Gemini](https://gemi
 
 ## Installation
 
+> 💡 **Recommended: use together with [Voyager](https://github.com/voyager-crew/voyager) 2.x.** The extension detects Voyager and listens to its "Gemini is loading history" signal, so long conversations load completely and quickly. It still works without Voyager, but long chats fall back to timeouts and are slower. The popup's current-chat card shows whether Voyager is linked.
+
 Not yet published to the Chrome Web Store. Load manually via Developer Mode:
 
 **Option A: Download ZIP (recommended)**
@@ -431,6 +470,7 @@ $JSC test/run_tests.js
 ## Known Limitations
 
 - Gemini's DOM structure changes periodically — if backups fail, please open an Issue
+- Without Voyager, history loading relies on timeouts: each changed long conversation waits about 30 extra seconds at the end
 - The folder write permission granted via File System Access API may need to be re-confirmed after a browser restart (just click "Backup Now" again to trigger re-authorization)
 - Do not close the Gemini tab while a backup is running
 

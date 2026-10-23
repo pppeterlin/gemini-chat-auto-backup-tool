@@ -277,7 +277,8 @@ function updateFullBackupUI(state) {
 async function refreshCurrentChatStatus() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.url?.includes('gemini.google.com/app/')) {
+    // 標準對話 /app/[id]；Gem 對話 /gem/[gemId]/[id]
+    if (!/gemini\.google\.com\/(app|gem\/[^/?#]+)\/[^/?#]+/.test(tab?.url || '')) {
       document.getElementById('current-chat-card').style.display = 'none';
       return;
     }
@@ -297,6 +298,11 @@ async function refreshCurrentChatStatus() {
     } else {
       setSyncStatus('never', null);
     }
+
+    // Voyager 提供歷史載入的請求訊號；沒裝時備份仍可用，但長對話要靠逾時判斷、較慢
+    const voyagerEl = document.getElementById('voyager-status');
+    voyagerEl.className = `voyager-status ${result.voyager ? 'linked' : 'missing'}`;
+    voyagerEl.textContent = i18nText(result.voyager ? 'voyagerLinked' : 'voyagerMissing');
   } catch (_) {
     document.getElementById('current-chat-card').style.display = 'none';
   }
@@ -427,6 +433,7 @@ function initLanguageSelector() {
 async function selectLanguage(lang) {
   i18n.setLanguage(lang);
   updateUIText();
+  refreshCurrentChatStatus(); // 同步狀態與 Voyager 提示是動態文字，需重新產生
 
   // 重新生成備份狀態文本（如果有進行中或完成的備份）
   const { fullBackupState } = await chrome.storage.local.get('fullBackupState');

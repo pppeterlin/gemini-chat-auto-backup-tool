@@ -109,8 +109,12 @@ function formatTimestamp(date) {
 }
 
 function extractChatId(url) {
-  // Match /app/[chatId] anywhere in the URL (handles standard and Gem chat URLs)
-  const match = (url || '').match(/\/app\/([a-zA-Z0-9_-]+)/);
+  // 標準對話 /app/[chatId]；Gem 對話開啟後網址會變成 /gem/[gemId]/[chatId]
+  //（側邊欄 href 仍是 /app/[chatId]）。兩者必須算出同一個 ID，否則手動備份與
+  // 全量備份會把同一個 Gem 對話存成兩份。
+  const s = url || '';
+  const match = s.match(/\/app\/([a-zA-Z0-9_-]+)/) ||
+                s.match(/\/gem\/[a-zA-Z0-9_-]+\/([a-zA-Z0-9_-]+)/);
   return match ? match[1] : null;
 }
 
@@ -239,295 +243,179 @@ async function extractConversation(tabId) {
 
 // ── 完整歷史載入 ───────────────────────────────────────────────────────────────
 //
-// Gemini 開啟長對話時只載入最近的訊息，需要往上捲動才會載入更早的歷史。
-// 策略（自 v2.2 起不再依賴 Gemini Voyager 的 timeline dot——新版 Voyager
-// 已將 dot 虛擬化，數量不再等於訊息數）：
-//   1. 對所有候選容器捲到頂端並主動派發 scroll 事件（實測部分容器為
-//      overflow:hidden，單一容器 scrollTop=0 不會觸發 Gemini 的 listener）
-//   2. 用 MutationObserver 指紋（訊息數 + 最上方訊息文字）偵測是否有新內容；
-//      看到 Gemini 內建的 loading-history-spinner 就等它消失再判定
-//   3. 捲動沒反應時，模擬點擊最上方的使用者訊息（Voyager 1.5+ 驗證過的手法，
-//      會促使 Gemini 載入更早的歷史）
-//   4. 連續 2 圈無新內容（中間 backoff 重試）→ 歷史已完整載入
-//   5. 使用者按「停止」→ window.__geminiBackupAborted 旗標，任何等待中立即返回
+// Gemini 開啟長對話時只 render 最近 10 則；最上方那則捲進畫面時才向後端要更早的
+// 一頁（batchexecute rpcid hNvQHb，每頁 10 則），載到第一則之後就不再發請求。
 //
-// 一律載入完整歷史。曾經有個 stopAtCount 參數（載到上次備份的訊息數就停），
-// 但那是錯的：Gemini 是「從最新往回」載入，載到 prevMsgCount 拿到的是
-// 最新的 prevMsgCount 則，而備份檔是整份覆寫的 —— 對話新增 N 則之後，
-// 寫回去的檔案就會少掉最舊的 N 則。要完整備份就得真的捲到最舊。
-// 「沒有新訊息就完全不捲」由呼叫端的尾端指紋負責，不靠這裡提前收工。
+// Voyager 2.x 在 MAIN world 裝了 conversation-history-observer，每個 hNvQHb 請求
+// 都會 postMessage {source:'gv-history-observer', type:'request', payload:{phase}}，
+// 不受 Voyager 其他設定影響。我們直接聽這個訊號判斷「Gemini 還在抓」，
+// 等待方式比照 Voyager 自己的匯出預載：
+//   捲到頂 → 等內容變化；請求在飛（或剛結束 2 秒內）就持續延長等待
+//   沒有請求、也沒有新內容，安靜滿一個視窗 → 已經是第一則，收工
+//
+// 2026-10 實測（Voyager 2.2.0）：
+//   - 每頁 10 則；捲到頂後 0.04～2.3 秒發出請求，單一請求 1.3～30 秒（被節流時更慢），
+//     上一頁結束到下一頁開始偶爾隔 5～9 秒
+//   - 請求進行中，對話區的 loading spinner 全程不可見 —— 舊版的 spinner 偵測是死碼，
+//     「8 秒沒變化 + 點最上方訊息 + 兩輪確認」約 16 秒就收工，遇到慢請求會把備份截斷
+//   - 最後一頁一定不足 10 則（348 則的對話最後一頁 8 則、173 則的是 3 則），
+//     到頂後再捲也不會有任何請求
+//
+// 沒有 Voyager 時只能靠內容變化 + 固定逾時，安靜視窗須涵蓋最慢的請求，正確但慢。
+//
+// 一律載入完整歷史：Gemini 從最新往回載，備份檔是整份覆寫的，只載一部分會讓
+// 最舊的訊息從備份裡消失（見 v2.2.3）。「沒有新訊息就完全不捲」由呼叫端的
+// 尾端指紋負責，不靠這裡提前收工。
 async function scrollToLoadAllMessages(tabId) {
-  const run = () => chrome.scripting.executeScript({
+  const voyager = await detectVoyager(tabId);
+  await chrome.scripting.executeScript({
     target: { tabId },
-    func: async (userSelectors, modelSelectors) => {
-      const MAX_ITERATIONS = 80;             // 每圈約載入 10–20 則 → 支援 800+ 則長對話
-      const WALL_TIMEOUT_MS = 5 * 60000;     // 整體上限 5 分鐘，避免無限卡住
-      const PROGRESS_TIMEOUT_MS = 8000;      // 每圈最多等 8 秒看是否有新內容
-      // 確認回合用較短的逾時：實測一批歷史約 1.2 秒就載入完，
-      // 走到確認階段代表多半已經到頂，沒必要每次都空等滿 8 秒。
-      // 每個對話結尾可省下約 9 秒 —— 500+ 對話的全量備份差距超過一小時。
-      const CONFIRM_TIMEOUT_MS = 3500;
-      const SPINNER_FINISH_WAIT_MS = 10000;  // 看到 spinner 後等它消失的上限
-      const STABILITY_RETRIES = 2;           // 連續 N 圈無進度才視為「真的到頂」
-      const RETRY_BACKOFF_MS = 1500;         // 無進度後的喘息時間
-
-      const wait = ms => new Promise(r => setTimeout(r, ms));
-      const isAborted = () => !!window.__geminiBackupAborted;
-
-      function countBySelectors(selectors) {
-        for (const sel of selectors) {
-          try {
-            const n = document.querySelectorAll(sel).length;
-            if (n) return n;
-          } catch (_) {}
-        }
-        return 0;
-      }
-
-      // 與 chatMsgCount 相同口徑：使用者訊息 + 模型回覆總數
-      function countTurns() {
-        return countBySelectors(userSelectors) + countBySelectors(modelSelectors);
-      }
-
-      function getTopUserEl() {
-        for (const sel of userSelectors) {
-          try {
-            const els = document.querySelectorAll(sel);
-            if (els.length) return els[0];
-          } catch (_) {}
-        }
-        return null;
-      }
-
-      // 嚴格判斷「真正可捲動」：實測 #chat-history 與 .chat-history-scroll-container
-      // 是 overflow:hidden（設 scrollTop 沒效果），只有
-      // infinite-scroller[data-test-id="chat-history-container"] 真正可捲
-      function isScrollable(el) {
-        if (!el) return false;
-        if (el.scrollHeight <= el.clientHeight + 50) return false;
-        try {
-          const oy = getComputedStyle(el).overflowY;
-          return /(auto|scroll|overlay)/.test(oy);
-        } catch (_) { return true; }
-      }
-
-      function getScrollEl() {
-        const candidates = [
-          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
-          document.querySelector('#chat-history'),
-          document.querySelector('.chat-history-scroll-container'),
-          document.querySelector('infinite-scroller.chat-history'),
-          document.querySelector('infinite-scroller'),
-          document.querySelector('.chat-history'),
-          document.querySelector('.cdk-virtual-scroll-viewport'),
-          document.querySelector('main'),
-          document.querySelector('[data-scroll-container]'),
-        ];
-        for (const c of candidates) {
-          if (isScrollable(c)) return c;
-        }
-        // Fallback: 從首則訊息往上找最近可捲動的祖先
-        const firstMsg = getTopUserEl();
-        if (firstMsg) {
-          let el = firstMsg.parentElement;
-          while (el && el !== document.body) {
-            if (isScrollable(el)) return el;
-            el = el.parentElement;
-          }
-        }
-        return document.scrollingElement || document.documentElement;
-      }
-
-      // Gemini 內建 spinner — 抓更早歷史時顯示。判斷實際可見而非僅存在 DOM。
-      // 2026-08 實測：舊的 loading-history-spinner / .loading-history-spinner-container
-      // 在 Voyager 已不存在（querySelectorAll 全部 0 筆），現行 class 是
-      // .loading-content-spinner-container，漏掉它等於整段 spinner 偵測是死碼。
-      function isSpinnerVisible() {
-        const candidates = document.querySelectorAll(
-          '[data-test-id="loading-history-spinner"], ' +
-          '.loading-content-spinner-container, ' +
-          '.loading-history-spinner-container mat-progress-spinner, ' +
-          '.loading-history-spinner-container mat-spinner'
-        );
-        for (const el of candidates) {
-          const r = el.getBoundingClientRect();
-          if (r.width > 0 && r.height > 0) {
-            const cs = getComputedStyle(el);
-            if (cs.visibility !== 'hidden' && cs.display !== 'none' &&
-                parseFloat(cs.opacity || '1') > 0) {
-              return true;
-            }
-          }
-        }
-        return false;
-      }
-
-      // 展開 collapsed 回覆。注意排除 [data-test-id="luminous-expand-button"]——
-      // 它是側邊欄的展開鈕（aria-label 同為「展開」），點到會干擾側邊欄狀態。
-      function expandAllCollapsed() {
-        document.querySelectorAll(
-          'button[aria-label="Expand"], button[aria-label="展開"]'
-        ).forEach(b => {
-          if (b.getAttribute('data-test-id') === 'luminous-expand-button') return;
-          if (b.closest('bard-sidenav, [data-test-id="bard-sidenav-container"]')) return;
-          try { b.click(); } catch (_) {}
-        });
-      }
-
-      // 內容指紋：訊息數 + 最上方使用者訊息的文字片段。
-      // 新歷史載入時兩者至少會變其一（單看數量在虛擬化 DOM 下不可靠）。
-      function fingerprint() {
-        const top = getTopUserEl();
-        const sample = top ? (top.textContent || '').slice(0, 200) : '';
-        return `${countTurns()}|${sample}`;
-      }
-
-      // MutationObserver + 輪詢等待內容變化；abort 時立即返回 false
-      function waitForChange(before, timeoutMs) {
-        return new Promise(resolve => {
-          let done = false;
-          let obs = null;
-          let poll = null;
-          let tm = null;
-          const finish = (changed) => {
-            if (done) return;
-            done = true;
-            try { obs?.disconnect(); } catch (_) {}
-            clearInterval(poll);
-            clearTimeout(tm);
-            resolve(changed);
-          };
-          const check = () => {
-            if (isAborted()) { finish(false); return; }
-            if (fingerprint() !== before) finish(true);
-          };
-          try {
-            obs = new MutationObserver(check);
-            obs.observe(document.body, { childList: true, subtree: true });
-          } catch (_) {}
-          poll = setInterval(check, 250);
-          tm = setTimeout(() => finish(false), timeoutMs);
-        });
-      }
-
-      // 觸發載入更早的歷史：對所有候選容器捲到頂 + 派發 scroll 事件
-      //（某些 listener 是 passive，scrollTop assignment 不會自動觸發）
-      function triggerLoadOlder() {
-        const topUser = getTopUserEl();
-        try { topUser?.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {}
-        const targets = [
-          document.querySelector('infinite-scroller[data-test-id="chat-history-container"]'),
-          document.querySelector('#chat-history'),
-          document.querySelector('.chat-history-scroll-container'),
-          document.querySelector('infinite-scroller'),
-          document.querySelector('.cdk-virtual-scroll-viewport'),
-          getScrollEl(),
-        ].filter(Boolean);
-        const seen = new Set();
-        for (const t of targets) {
-          if (seen.has(t)) continue;
-          seen.add(t);
-          try {
-            t.scrollTop = 0;
-            t.dispatchEvent(new Event('scroll', { bubbles: true }));
-          } catch (_) {}
-        }
-        window.scrollTo(0, 0);
-      }
-
-      expandAllCollapsed();
-
-      const startTime = Date.now();
-      let noProgress = 0;
-      let clickTried = false;
-
-      for (let attempt = 0; attempt < MAX_ITERATIONS; attempt++) {
-        if (isAborted()) return;
-        if (Date.now() - startTime > WALL_TIMEOUT_MS) break;
-
-        const before = fingerprint();
-        triggerLoadOlder();
-
-        let changed = await waitForChange(
-          before, noProgress > 0 ? CONFIRM_TIMEOUT_MS : PROGRESS_TIMEOUT_MS
-        );
-        if (isAborted()) return;
-
-        // spinner 還在轉表示 Gemini 正在抓歷史 — 等它消失再重新判定
-        if (!changed && isSpinnerVisible()) {
-          const spinnerDeadline = Date.now() + SPINNER_FINISH_WAIT_MS;
-          while (Date.now() < spinnerDeadline && isSpinnerVisible()) {
-            await wait(250);
-            if (isAborted()) return;
-          }
-          changed = fingerprint() !== before;
-        }
-
-        // 新載入的訊息可能含 collapsed 區段 — 每圈都重新展開
-        expandAllCollapsed();
-
-        if (changed) {
-          noProgress = 0;
-          clickTried = false;
-          await wait(250);
-          continue;
-        }
-
-        // 捲動沒有觸發載入：點擊最上方的使用者訊息一次（Voyager 1.5+ 的手法）
-        if (!clickTried) {
-          clickTried = true;
-          const topUser = getTopUserEl();
-          if (topUser) {
-            try {
-              const opts = { bubbles: true, cancelable: true, view: window };
-              topUser.dispatchEvent(new MouseEvent('mousedown', opts));
-              topUser.dispatchEvent(new MouseEvent('mouseup', opts));
-              topUser.click();
-            } catch (_) {}
-            const clickChanged = await waitForChange(fingerprint(), CONFIRM_TIMEOUT_MS);
-            if (isAborted()) return;
-            if (clickChanged) { noProgress = 0; continue; }
-          }
-        }
-
-        // 兩種策略都沒有新內容：backoff 後再確認一次，連續無進度才收工
-        noProgress++;
-        if (noProgress >= STABILITY_RETRIES) break;
-        await wait(RETRY_BACKOFF_MS);
-        if (isAborted()) return;
-      }
-
-      // Restore to bottom（Voyager 存在時點最後一個 dot 跳到最新訊息）
-      const el = getScrollEl();
-      if (el) el.scrollTop = el.scrollHeight;
-      const dots = document.querySelectorAll('.timeline-dot');
-      if (dots.length) { try { dots[dots.length - 1].click(); } catch (_) {} }
-      window.scrollTo(0, document.body.scrollHeight);
-      await wait(400);
-    },
-    args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS],
+    func: loadFullHistoryOnPage,
+    args: [USER_TURN_SELECTORS, MODEL_TURN_SELECTORS, voyager],
   });
+}
 
+// Voyager 的 history observer 跑在 MAIN world，isolated world 看不到它的全域旗標，
+// 所以要到 MAIN world 探測。探測失敗一律視為沒有 Voyager（走較慢但正確的退回路徑）。
+async function detectVoyager(tabId) {
   try {
-    await run();
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => !!window.__gvHistoryObserverInstalled,
+    });
+    return !!res?.result;
   } catch (_) {
-    // 點擊最上方訊息偶爾會觸發整頁重載（Voyager 亦有相同情況），
-    // 此時 executeScript 會中斷；等頁面重新載入完成後重跑一次。
-    await waitForTabComplete(tabId, 20000);
-    await new Promise(r => setTimeout(r, 2500));
-    await run();
+    return false;
   }
 }
 
-// 等待分頁進入 complete 狀態（輪詢，最長 timeoutMs）
-async function waitForTabComplete(tabId, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      if (tab.status === 'complete') return;
-    } catch (_) { return; }
-    await new Promise(r => setTimeout(r, 500));
+// 注入頁面執行（isolated world；window.postMessage 的事件在各 world 都收得到）
+async function loadFullHistoryOnPage(userSelectors, modelSelectors, voyager) {
+  const PAGE_SIZE = 10;                              // Gemini 每頁 10 則
+  const QUIET_MS = voyager ? 12000 : 30000;          // 無請求、無新內容持續這麼久 → 到頂
+  const SHORT_QUIET_MS = voyager ? 3000 : 5000;      // 上一頁不足 10 則（幾乎必是第一頁）時的確認窗
+  const LOAD_GRACE_MS = 2000;                        // 請求結束後留給 render 的時間
+  const LOAD_TIMEOUT_MS = 90000;                     // 單輪上限，避免遺失的 end 訊號卡死
+  const MAX_ROUNDS = 300;                            // 每輪 10 則 → 支援 3000 則
+  const WALL_TIMEOUT_MS = 20 * 60000;
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const isAborted = () => !!window.__geminiBackupAborted;
+
+  function firstMatch(selectors) {
+    for (const sel of selectors) {
+      try {
+        const els = document.querySelectorAll(sel);
+        if (els.length) return els;
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  const countUsers = () => firstMatch(userSelectors).length;
+
+  // 內容指紋：訊息數 + 最上方使用者訊息的文字片段，新歷史載入時至少會變其一
+  function fingerprint() {
+    const users = firstMatch(userSelectors);
+    const sample = users[0] ? (users[0].textContent || '').slice(0, 200) : '';
+    return `${users.length + firstMatch(modelSelectors).length}|${sample}`;
+  }
+
+  let inFlight = 0;
+  let lastEndAt = 0;
+  const onMessage = (ev) => {
+    if (ev.source !== window) return;
+    const d = ev.data;
+    if (!d || d.source !== 'gv-history-observer' || d.type !== 'request') return;
+    if (d.payload?.phase === 'start') {
+      inFlight++;
+    } else if (d.payload?.phase === 'end') {
+      inFlight = Math.max(0, inFlight - 1);
+      lastEndAt = Date.now();
+    }
+  };
+  const isLoading = () => inFlight > 0 || Date.now() - lastEndAt < LOAD_GRACE_MS;
+
+  // 等內容變化：請求還在飛就延長期限，安靜滿 quietMs 才放棄。
+  // 變化後再等到請求結束、指紋穩定，避免 render 一半就算「這頁只有 3 則」。
+  async function waitForMore(before, quietMs) {
+    const start = Date.now();
+    let deadline = start + quietMs;
+    while (Date.now() - start < LOAD_TIMEOUT_MS) {
+      if (isAborted()) return false;
+      if (isLoading()) deadline = Math.max(deadline, Date.now() + quietMs);
+      if (fingerprint() !== before) {
+        let last = fingerprint();
+        let stableSince = Date.now();
+        while (Date.now() - start < LOAD_TIMEOUT_MS && !isAborted()) {
+          await wait(150);
+          const fp = fingerprint();
+          if (fp !== last) { last = fp; stableSince = Date.now(); }
+          if (!isLoading() && Date.now() - stableSince >= 500) break;
+        }
+        return true;
+      }
+      if (Date.now() > deadline) return false;
+      await wait(100);
+    }
+    return fingerprint() !== before;
+  }
+
+  function scroller() {
+    return document.querySelector('infinite-scroller[data-test-id="chat-history-container"]') ||
+           document.querySelector('infinite-scroller');
+  }
+
+  // Gemini 在最上方訊息進入畫面時才會要下一頁。主動派發 scroll 事件，
+  // 因為部分 listener 是 passive，scrollTop assignment 不會自動觸發。
+  function triggerLoadOlder() {
+    try { firstMatch(userSelectors)[0]?.scrollIntoView({ block: 'start' }); } catch (_) {}
+    const sc = scroller();
+    if (sc) {
+      sc.scrollTop = 0;
+      try { sc.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
+    }
+  }
+
+  // 展開 collapsed 回覆。注意排除 [data-test-id="luminous-expand-button"]——
+  // 它是側邊欄的展開鈕（aria-label 同為「展開」），點到會干擾側邊欄狀態。
+  function expandAllCollapsed() {
+    document.querySelectorAll(
+      'button[aria-label="Expand"], button[aria-label="展開"]'
+    ).forEach(b => {
+      if (b.getAttribute('data-test-id') === 'luminous-expand-button') return;
+      if (b.closest('bard-sidenav, [data-test-id="bard-sidenav-container"]')) return;
+      try { b.click(); } catch (_) {}
+    });
+  }
+
+  window.addEventListener('message', onMessage);
+  try {
+    // 剛導航完時第一頁可能還在 render，先等至少一則訊息出現
+    const startTime = Date.now();
+    while (!countUsers() && Date.now() - startTime < 10000 && !isAborted()) await wait(100);
+    expandAllCollapsed();
+
+    let lastPage = countUsers(); // 初次 render 的就是最新一頁
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      if (isAborted() || Date.now() - startTime > WALL_TIMEOUT_MS) break;
+
+      const before = fingerprint();
+      const usersBefore = countUsers();
+      triggerLoadOlder();
+
+      const quiet = lastPage > 0 && lastPage < PAGE_SIZE ? SHORT_QUIET_MS : QUIET_MS;
+      if (!(await waitForMore(before, quiet))) break;
+
+      lastPage = countUsers() - usersBefore;
+      expandAllCollapsed(); // 新載入的訊息可能含 collapsed 區段
+    }
+  } finally {
+    window.removeEventListener('message', onMessage);
+    // 捲回最新訊息，讓頁面回到使用者習慣的位置
+    const sc = scroller();
+    if (sc) sc.scrollTop = sc.scrollHeight;
   }
 }
 
@@ -854,7 +742,7 @@ async function performBackup() {
 
 // ── Scroll sidebar to load all conversation links ─────────────────────────────
 //
-// Gemini 2026 (Voyager) 側邊欄以 <infinite-scroller> 分批載入對話，每批 20 個。
+// Gemini 2026 側邊欄以 <infinite-scroller> 分批載入對話，每批 20 個。
 // 2026-08 實測（533 個對話的帳號）記錄下列行為，本實作針對這些行為設計：
 //
 //   1. 批次之間有「無新增」的空窗期 — 觀測到連續 5～7 輪（約 4～6 秒）計數不變，
@@ -983,11 +871,15 @@ async function sidebarScanSlice(rounds, stableTarget, targetNonPinned) {
     );
   }
 
-  // 釘選數量（釘選項目一律排在最前面，且永遠全部備份，不計入 N）
+  // 釘選數量（釘選項目一律排在最前面，且永遠全部備份，不計入 N）。
+  // 2026-10 起釘選圖示是項目內的 .conversation-pin-icon；舊版在 .trailing-icon-container。
+  // 數錯會讓「前 N 個」提早收工：實測 10 個釘選全被算成非釘選，只拿到 N-10 個。
   function countPinned() {
     const root = sidenav() || document;
-    return root.querySelectorAll(
-      '.trailing-icon-container [data-mat-icon-name="push_pin"]'
+    return Array.from(root.querySelectorAll('[data-test-id="conversation"]')).filter(el =>
+      el.querySelector(
+        '.conversation-pin-icon, .trailing-icon-container [data-mat-icon-name="push_pin"]'
+      )
     ).length;
   }
 
@@ -1225,7 +1117,7 @@ async function performFullHistoryBackup(limitCount = 0) {
       }
     } catch (_) {} // 偵測失敗就照常繼續，sidebar_scanner 結果為空時有既有錯誤處理
 
-    // 先捲側邊欄把「所有」對話載進 DOM（Voyager 每批 20 個，需捲很多輪）。
+    // 先捲側邊欄把「所有」對話載進 DOM（Gemini 每批 20 個，需捲很多輪）。
     // 期間把已載入數量回報到 state，讓 popup 顯示「正在掃描（N）」而不是空轉。
     let scanResult = null;
     try {
@@ -1753,7 +1645,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           } catch (_) {}
         }
 
-        sendResponse({ isSynced, isSyncing, lastSyncTime, hasNewMessages });
+        const voyager = tabId ? await detectVoyager(tabId) : false;
+        sendResponse({ isSynced, isSyncing, lastSyncTime, hasNewMessages, voyager });
       }
     );
     return true;
@@ -1798,7 +1691,7 @@ function countMessagesOnPage(userSelectors, modelSelectors) {
 // 為什麼需要它：Gemini 開啟長對話時「只 render 最後 20 則」，其餘要往上捲才載入。
 // 舊版增量判斷用「目前畫面上的訊息數 <= 上次備份數」來略過，對超過 20 則的對話
 // 永遠成立（20 <= 200），結果是長對話一旦備份過就再也不會更新 —— 新訊息被靜默漏掉。
-// 2026-08 於 Voyager 實測確認：初次 render 固定 20 則，且「最後一則」一定在 DOM 裡
+// 2026-08 實測確認：初次 render 固定 20 則，且「最後一則」一定在 DOM 裡
 // （捲到底後尾端內容不變）。因此改用尾端內容當指紋：新訊息一律 append 在尾端，
 // 尾端沒變就代表沒有新訊息，這個判斷不受虛擬化 render 影響。
 function computeTailSignatureOnPage(userSelectors, modelSelectors) {
@@ -1819,12 +1712,18 @@ function computeTailSignatureOnPage(userSelectors, modelSelectors) {
     return results;
   }
 
+  // Voyager 的「訊息時間」標籤（.gv-timestamp）插在 user-query 內且非同步出現，
+  // 算進指紋會讓同一則訊息時有時無地變動，因此先扣掉
   function lastText(selectors) {
     for (const sel of selectors) {
       const found = queryShadowAll(document, sel);
       if (found.length) {
         const el = found[found.length - 1];
-        return (el.innerText || el.textContent || '').trim();
+        let text = el.innerText || el.textContent || '';
+        for (const ts of el.querySelectorAll('.gv-timestamp')) {
+          text = text.replace(ts.innerText || ts.textContent || '', '');
+        }
+        return text.trim();
       }
     }
     return '';

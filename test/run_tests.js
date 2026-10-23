@@ -16,6 +16,7 @@ function createEl(tag, attrs = {}) {
     nodeType: Node.ELEMENT_NODE,
     style: {},
     className: attrs.className || '',
+    classList: { contains: c => (attrs.className || '').split(/\s+/).includes(c) },
     textContent: '',
     children: [],
     childNodes: children,
@@ -80,6 +81,8 @@ function htmlToMarkdown(rootEl) {
       'sources-carousel-inline', 'source-inline-chip', 'tts-control',
       'message-actions', 'sensitive-memories-banner',
     ].includes(tag)) return '';
+    // Voyager 的「訊息時間」標籤插在 user-query 內，不屬於對話正文
+    if (node.classList && node.classList.contains('gv-timestamp')) return '';
     const inner = () => Array.from(node.childNodes).map(convert).join('');
     switch (tag) {
       case 'h1': return `\n# ${inner().trim()}\n`;
@@ -171,13 +174,30 @@ function parseBackupMeta(mdText) {
 
 // 對話 ID 擷取（同 background.js / sidebar_scanner.js）
 function extractChatId(url) {
-  const match = (url || '').match(/\/app\/([a-zA-Z0-9_-]+)/);
+  const s = url || '';
+  const match = s.match(/\/app\/([a-zA-Z0-9_-]+)/) ||
+                s.match(/\/gem\/[a-zA-Z0-9_-]+\/([a-zA-Z0-9_-]+)/);
   return match ? match[1] : null;
 }
 
+// jslog metadata 解碼（同 sidebar_scanner.js）
+function jslogTexts(value) {
+  const raw = String(value || '');
+  const texts = [];
+  const m = raw.match(/BardVeMetadataKey:([A-Za-z0-9+/_-]+={0,2})/);
+  if (m) {
+    try { texts.push(atob(m[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch (_) {}
+  }
+  texts.push(raw);
+  return texts;
+}
+
 function extractChatIdFromJslog(value) {
-  const match = String(value || '').match(/\bc_([a-zA-Z0-9_-]+)/);
-  return match ? match[1] : null;
+  for (const text of jslogTexts(value)) {
+    const match = text.match(/\bc_([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -381,6 +401,15 @@ icon.childNodes.push(createText('edit'));
 icon.textContent = 'edit';
 assertEqual('mat-icon 忽略', htmlToMarkdown(icon), '');
 
+// Voyager「訊息時間」標籤（.gv-timestamp）不可混進備份內文，否則開關該功能會改變 hash
+const userTurn = createEl('div');
+const tsLabel = createEl('div', { className: 'gv-timestamp gv-timestamp-user' });
+tsLabel.childNodes.push(createText('2026/10/20 14:32')); tsLabel.textContent = '2026/10/20 14:32';
+const bubble = createEl('p'); bubble.childNodes.push(createText('幫我翻譯')); bubble.textContent = '幫我翻譯';
+userTurn.appendChild(tsLabel);
+userTurn.appendChild(bubble);
+assertEqual('排除 Voyager 訊息時間標籤', htmlToMarkdown(userTurn), '幫我翻譯');
+
 // ── Test 8: 穩定內容雜湊（增量判斷核心）─────────────────────────────────────────
 print('\n【T8】穩定內容雜湊');
 
@@ -433,6 +462,12 @@ assertEqual('標準 URL', extractChatId('https://gemini.google.com/app/abc123'),
 assertEqual('Gem 對話 URL', extractChatId('https://gemini.google.com/gem/xyz/app/def456'), 'def456');
 assertEqual('URL 帶 query', extractChatId('https://gemini.google.com/app/abc123?hl=zh-TW'), 'abc123');
 test('非對話 URL 回傳 null', () => extractChatId('https://gemini.google.com/') === null);
+// 2026-10：Gem 對話開啟後網址變成 /gem/[gemId]/[chatId]，側邊欄 href 仍是 /app/[chatId]
+assertEqual('Gem 對話新網址', extractChatId('https://gemini.google.com/gem/956cefb6d133/61fb891cee4d7c75'), '61fb891cee4d7c75');
+test('Gem 新舊網址算出同一個 ID', () =>
+  extractChatId('https://gemini.google.com/gem/956cefb6d133/61fb891cee4d7c75') ===
+  extractChatId('https://gemini.google.com/app/61fb891cee4d7c75'));
+test('Gem 首頁（無對話）回傳 null', () => extractChatId('https://gemini.google.com/gem/956cefb6d133') === null);
 
 assertEqual('jslog 擷取', extractChatIdFromJslog('186014; track:generic_click; BardVeMetadataKey:[["c_9a8b7c6d","r_x"]]'), '9a8b7c6d');
 test('jslog 無 ID 回傳 null', () => extractChatIdFromJslog('186014; track:generic_click') === null);
@@ -442,17 +477,20 @@ const folderName = '學習筆記_Part_2_abc123';
 test('資料夾後綴匹配 convId', () => folderName.endsWith('_abc123'));
 test('不匹配其他 convId', () => !folderName.endsWith('_def456'));
 
-// ── Test 11: Voyager jslog metadata 解析 ────────────────────────────────────
-print('\n【T11】Voyager jslog metadata（釘選狀態與清單順序）');
+// ── Test 11: jslog metadata 解析 ────────────────────────────────────────────
+print('\n【T11】jslog metadata（釘選狀態與清單順序）');
 
-// 2026-08 於 Gemini Voyager 實測到的真實 jslog 字串
 function extractMetaFromJslog(value) {
-  const match = String(value || '').match(
-    /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*\]/
-  );
-  if (!match) return null;
-  return { pinned: match[1] === '1', index: Number(match[2]) };
+  for (const text of jslogTexts(value)) {
+    const match = text.match(
+      /\bc_[a-zA-Z0-9_-]+"\s*,\s*[^,\]]*,\s*(\d+)\s*,\s*(\d+)\s*[,\]]/
+    );
+    if (match) return { pinned: match[1] === '1', index: Number(match[2]) };
+  }
+  return null;
 }
+
+// 2026-08 實測：明文 metadata
 
 const pinnedJslog =
   '186014;track:generic_click,impression;BardVeMetadataKey:' +
@@ -470,6 +508,22 @@ test('格式不符回傳 null', () => extractMetaFromJslog('186014;track:generic
 // jslog 內另有 "generic_click"，chatId 抽取必須帶 \b 才不會誤抓成 "lick"
 assertEqual('chatId 不被 generic_click 汙染',
   extractChatIdFromJslog(pinnedJslog), '5c20a79185935ade');
+
+// 2026-10 實測：metadata 改為 base64，且多一個尾欄位 ["c_<id>",null,<pinned>,<index>,0]
+const b64Pinned =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  'W251bGwsbnVsbCxudWxsLG51bGwsbnVsbCxudWxsLG51bGwsWyJjXzRkMGFmNjBjYjgwM2JjMjAiLG51bGwsMSw4LDBdXQ==' +
+  ';mutable:true';
+const b64Plain =
+  '186014;track:generic_click,impression;BardVeMetadataKey:' +
+  btoa('[null,null,null,null,null,null,null,["c_910ddb01cd1ce0ff",null,0,10,0]]') +
+  ';mutable:true';
+test('base64：釘選項目 pinned=true', () => extractMetaFromJslog(b64Pinned).pinned === true);
+assertEqual('base64：釘選項目 index', extractMetaFromJslog(b64Pinned).index, 8);
+test('base64：一般項目 pinned=false', () => extractMetaFromJslog(b64Plain).pinned === false);
+assertEqual('base64：一般項目 index', extractMetaFromJslog(b64Plain).index, 10);
+assertEqual('base64：chatId 從解碼內容取得', extractChatIdFromJslog(b64Pinned), '4d0af60cb803bc20');
+test('base64 解碼失敗不拋錯', () => extractMetaFromJslog('BardVeMetadataKey:@@@;mutable:true') === null);
 
 // ── Test 12: 尾端指紋 ───────────────────────────────────────────────────────
 print('\n【T12】對話尾端指紋（增量備份判斷）');
